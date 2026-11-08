@@ -17,7 +17,7 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
 ```
 
 **Two tracks**
-- **Track A (automated, paper):** the bot trades an Alpaca paper account sized to $4,000.
+- **Track A (automated, paper):** the bot trades an Alpaca paper account (currently $100,000).
 - **Track B (assisted, real):** `signals` prints suggestions; you place trades yourself in Fidelity and record them with `log-trade --followed-ai yes|no`. (Fidelity has no retail trading API, and automating its website breaks its terms of service, so the human stays in the loop.)
 
 ## Setup
@@ -50,7 +50,9 @@ Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
 
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
-- Max 20% of equity in any one symbol, no margin, and no new orders after a 3% daily loss.
+- Max 20% of equity in any one symbol, no margin, and no new buys after a 3% daily loss.
+- Each position risks at most 1.5% of equity: a 7.5% stop-loss (1.5% / 20%), checked each time `paper` runs, followed by a 20-bar cooldown. It is not a resting order, so a price gap or a long gap between runs can lose more. Stops still execute when the daily-loss or stale-data guards block buying.
+- `backtest` and `walk-forward` include the stop; pass `--no-stop` to compare without it.
 - `paper` refuses to run if any bot symbol's prices are missing or older than `risk.max_data_age_days` (default 4).
 - Positions in the paper account that aren't in `paper_bot.symbols` are closed (`paper_bot.close_unlisted`).
 - `paper` is a dry run unless you pass `--execute`.

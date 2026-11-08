@@ -16,6 +16,35 @@ class BacktestResult:
     metrics: dict = field(default_factory=dict)
 
 
+def apply_stop_loss(close: pd.Series, target: pd.Series, stop_pct: float,
+                    cooldown_bars: int = 20) -> pd.Series:
+    """Exit when the close falls stop_pct below the entry close, then stay out.
+
+    Checked on closes only, like the bot, so a loss can exceed stop_pct on a gap.
+    Each decision uses prices up to that bar, so this adds no look-ahead.
+    """
+    prices = close.to_numpy(dtype=float)
+    out = target.reindex(close.index).fillna(0.0).to_numpy(dtype=float).copy()
+    entry, blocked_until = np.nan, 0
+    for i, price in enumerate(prices):
+        if i < blocked_until:
+            out[i], entry = 0.0, np.nan
+        elif out[i] <= 0:
+            entry = np.nan
+        elif np.isnan(entry):
+            entry = price
+        elif price <= entry * (1 - stop_pct):
+            out[i], entry, blocked_until = 0.0, np.nan, i + cooldown_bars
+    return pd.Series(out, index=close.index)
+
+
+def with_stop_loss(strategy, stop_pct: float, cooldown_bars: int = 20):
+    """Wrap a strategy function so its targets include the stop-loss."""
+    def wrapped(close: pd.Series, **params) -> pd.Series:
+        return apply_stop_loss(close, strategy(close, **params), stop_pct, cooldown_bars)
+    return wrapped
+
+
 def run_backtest(close: pd.Series, target: pd.Series, *, name: str = "strategy",
                  initial_capital: float = 4000.0, cost_bps: float = 5.0,
                  periods_per_year: int = 252) -> BacktestResult:

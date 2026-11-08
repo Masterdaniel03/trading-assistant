@@ -25,6 +25,17 @@ def check_daily_loss(equity: float, last_equity: float, risk: dict) -> None:
         )
 
 
+def stop_loss_pct(risk: dict) -> float:
+    """Loss from entry that uses up the per-position risk budget at full size."""
+    return risk["max_risk_per_position_pct"] / risk["max_position_pct"]
+
+
+def triggered_stops(returns: dict[str, float], risk: dict) -> dict[str, float]:
+    """Symbols whose return from entry has hit the stop. returns: symbol -> e.g. -0.08."""
+    limit = -stop_loss_pct(risk)
+    return {sym: r for sym, r in returns.items() if r <= limit}
+
+
 def check_data_fresh(last_dates: dict[str, str | None], today: date, risk: dict) -> None:
     """Refuse to trade on missing or stale prices.
 

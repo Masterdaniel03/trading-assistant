@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS trades (
     notes      TEXT
 );
 
+CREATE TABLE IF NOT EXISTS stop_events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT NOT NULL,
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,         -- latest price date when the stop fired
+    pl_pct  REAL NOT NULL          -- return from entry, e.g. -0.08
+);
+
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     ts      TEXT NOT NULL,
     account TEXT NOT NULL,
@@ -124,6 +132,17 @@ def log_trade(conn, account, symbol, side, qty=None, notional=None, price=None,
     )
     conn.commit()
     return cur.lastrowid
+
+
+def log_stop(conn, symbol, date, pl_pct) -> None:
+    conn.execute("INSERT INTO stop_events (ts, symbol, date, pl_pct) VALUES (?,?,?,?)",
+                 (now_utc(), symbol, date, float(pl_pct)))
+    conn.commit()
+
+
+def last_stop_date(conn, symbol) -> str | None:
+    row = conn.execute("SELECT MAX(date) FROM stop_events WHERE symbol = ?", (symbol,)).fetchone()
+    return row[0] if row else None
 
 
 def log_equity(conn, account, equity, cash=None) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 
 from tradebot.retry import call_with_retry, is_rate_limit, is_transient
 
@@ -25,6 +26,12 @@ def disable_builtin_retry(client) -> None:
 
 def _status(exc) -> int | None:
     return getattr(exc, "status_code", None)
+
+
+@dataclass(frozen=True)
+class PositionInfo:
+    market_value: float
+    unrealized_plpc: float  # return from average entry, e.g. -0.08
 
 
 class AlpacaBroker:
@@ -49,8 +56,12 @@ class AlpacaBroker:
 
     def positions(self) -> dict[str, float]:
         """symbol -> current market value in $."""
+        return {s: p.market_value for s, p in self.position_details().items()}
+
+    def position_details(self) -> dict[str, PositionInfo]:
         ps = call_with_retry(self.client.get_all_positions, what="alpaca positions")
-        return {p.symbol: float(p.market_value) for p in ps}
+        return {p.symbol: PositionInfo(float(p.market_value), float(p.unrealized_plpc or 0))
+                for p in ps}
 
     def is_market_open(self) -> bool:
         return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)

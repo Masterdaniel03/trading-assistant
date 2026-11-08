@@ -23,12 +23,13 @@ from pathlib import Path
 import pandas as pd
 
 from tradebot import db
-from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest
+from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest, with_stop_loss
 from tradebot.config import ROOT, load_config, load_secrets
 from tradebot.data import (AlpacaQuotes, fetch_many, fetch_prices, history_was_readjusted,
                            incremental_start, periods_per_year)
 from tradebot.rebalance import plan_orders
-from tradebot.risk import RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed
+from tradebot.risk import (RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed,
+                           stop_loss_pct, triggered_stops)
 from tradebot.strategies import STRATEGIES, get_strategy
 from tradebot.walkforward import walk_forward
 
@@ -84,13 +85,20 @@ def _strategy_params(cfg, name, symbol):
     return {**cfg.get("strategies", {}).get(name, {}), "periods_per_year": periods_per_year(symbol)}
 
 
-def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
+def _with_stop(cfg, strategy):
+    risk = cfg["risk"]
+    return with_stop_loss(strategy, stop_loss_pct(risk), risk["stop_cooldown_bars"])
+
+
+def _backtest_one(cfg, conn, symbol, strategy_name, plot=True, use_stop=True):
     close = db.load_close(conn, symbol)
     if close.empty:
         raise LookupError(f"No prices for {symbol}. Run: python main.py fetch {symbol}")
     bt = cfg["backtest"]
     ppy = periods_per_year(symbol)
     strat = get_strategy(strategy_name)
+    if use_stop and strategy_name != "buy_and_hold":
+        strat = _with_stop(cfg, strat)
     res = run_backtest(close, strat(close, **_strategy_params(cfg, strategy_name, symbol)),
                        name=strategy_name, initial_capital=bt["initial_capital"],
                        cost_bps=bt["cost_bps"], periods_per_year=ppy)
@@ -108,9 +116,10 @@ def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
 def cmd_backtest(cfg, args):
     conn = db.connect(cfg["db_path"])
     try:
-        res, bench = _backtest_one(cfg, conn, args.symbol, args.strategy)
+        res, bench = _backtest_one(cfg, conn, args.symbol, args.strategy, use_stop=not args.no_stop)
     except LookupError as e:
         sys.exit(str(e))
+    print("Stop-loss: off" if args.no_stop else f"Stop-loss: {stop_loss_pct(cfg['risk']):.1%}")
     print(f"\n{args.symbol}  {res.equity.index[0].date()} -> {res.equity.index[-1].date()}")
     print(format_metrics(compare([res, bench])).to_string())
 
@@ -152,7 +161,8 @@ def cmd_walk_forward(cfg, args):
         ppy = periods_per_year(sym)
         for name in names:
             try:
-                r = walk_forward(close, get_strategy(name), wf["grids"][name],
+                strat = get_strategy(name) if args.no_stop else _with_stop(cfg, get_strategy(name))
+                r = walk_forward(close, strat, wf["grids"][name],
                                  train_bars=wf["train_years"] * ppy, test_bars=wf["test_years"] * ppy,
                                  name=name, initial_capital=bt["initial_capital"],
                                  cost_bps=bt["cost_bps"], periods_per_year=ppy)
@@ -207,6 +217,14 @@ def cmd_signals(cfg, args):
         print(f"  {sym:<8} {t:.2f}")
 
 
+def _in_cooldown(conn, symbol, risk) -> bool:
+    stopped = db.last_stop_date(conn, symbol)
+    if stopped is None:
+        return False
+    bars_since = int((db.load_close(conn, symbol).index > pd.Timestamp(stopped)).sum())
+    return bars_since < risk["stop_cooldown_bars"]
+
+
 def cmd_paper(cfg, args):
     from tradebot.broker import AlpacaBroker
 
@@ -218,12 +236,6 @@ def cmd_paper(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
     try:
-        check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
-                         date.today(), risk)
-    except RiskViolation as e:
-        sys.exit(str(e))
-
-    try:
         broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
     except RuntimeError as e:
         sys.exit(str(e))
@@ -231,14 +243,32 @@ def cmd_paper(cfg, args):
     db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
     print(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
 
+    # These guards block new buys but must not block stop-loss exits.
+    halted = None
     try:
+        check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
+                         date.today(), risk)
         check_daily_loss(acct["equity"], acct["last_equity"], risk)
     except RiskViolation as e:
-        sys.exit(str(e))
+        halted = str(e)
+
+    held = broker.position_details()
+    stops = triggered_stops({s: p.unrealized_plpc for s, p in held.items()}, risk)
+    for sym, pl in stops.items():
+        print(f"  STOP  {sym:<6} {pl:+.1%} (limit {-stop_loss_pct(risk):+.1%})")
 
     targets = _current_targets(cfg, conn, pb["strategy"], pb["symbols"])
-    orders = plan_orders(targets, broker.positions(), acct["equity"], risk,
+    for sym in targets:
+        if sym in stops or _in_cooldown(conn, sym, risk):
+            targets[sym] = 0.0
+    orders = plan_orders(targets, {s: p.market_value for s, p in held.items()}, acct["equity"], risk,
                          close_unlisted=pb.get("close_unlisted", True))
+    if halted:
+        print(f"Blocked: {halted}")
+        orders = [o for o in orders if o.symbol in stops and o.side == "close"]
+        if not orders:
+            sys.exit("No stop-loss exits to send, so no orders.")
+        print("Sending stop-loss exits only.")
     if not orders:
         print("Portfolio already on target. No orders.")
         return
@@ -257,7 +287,11 @@ def cmd_paper(cfg, args):
             resp = broker.submit_notional(o.symbol, o.side, o.notional)
             side = o.side
         db.log_trade(conn, broker.account_name, o.symbol, side, notional=o.notional,
-                     strategy=pb["strategy"], order_id=str(getattr(resp, "id", "")))
+                     strategy=pb["strategy"], order_id=str(getattr(resp, "id", "")),
+                     notes="stop-loss" if o.symbol in stops else None)
+        if o.symbol in stops:
+            db.log_stop(conn, o.symbol, db.last_price_date(conn, o.symbol) or date.today().isoformat(),
+                        stops[o.symbol])
         print(f"  sent {side} {o.symbol}")
 
 
@@ -297,11 +331,13 @@ def build_parser():
     f.add_argument("--full", action="store_true", help="re-download full history instead of resuming")
     q = sub.add_parser("quote"); q.add_argument("symbols", nargs="*")
     b = sub.add_parser("backtest"); b.add_argument("symbol"); b.add_argument("strategy", choices=list(STRATEGIES))
+    b.add_argument("--no-stop", action="store_true", help="leave out the stop-loss")
     sub.add_parser("backtest-all")
     w = sub.add_parser("walk-forward", help="out-of-sample test with per-fold parameter selection")
     w.add_argument("symbols", nargs="*")
     w.add_argument("--strategy", choices=[n for n in STRATEGIES if n != "buy_and_hold"])
     w.add_argument("--verbose", action="store_true", help="print each fold")
+    w.add_argument("--no-stop", action="store_true", help="leave out the stop-loss")
     s = sub.add_parser("signals"); s.add_argument("--strategy", choices=list(STRATEGIES))
     pp = sub.add_parser("paper"); pp.add_argument("--execute", action="store_true")
     lt = sub.add_parser("log-trade", help="record a manual (e.g. Fidelity) trade")
