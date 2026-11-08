@@ -38,6 +38,7 @@ python main.py fetch
 | `python main.py quote [SYMBOLS...]` | Real-time bid/ask from Alpaca (free IEX feed for stocks; crypto needs no keys) |
 | `python main.py backtest SPY sma_crossover` | Backtest one strategy vs buy & hold, save chart to `reports/` |
 | `python main.py backtest-all` | Every watchlist symbol × strategy → `reports/backtest_summary.csv` |
+| `python main.py walk-forward [SYMBOLS...] [--strategy NAME] [--verbose]` | Out-of-sample test: picks parameters on each training window, trades them on the next window → `reports/walk_forward_summary.csv` |
 | `python main.py signals` | Today's target positions (also logged to the DB) |
 | `python main.py paper` | Dry run: shows orders the bot would send |
 | `python main.py paper --execute` | Sends those orders to Alpaca paper |
@@ -60,7 +61,8 @@ After the market closes (1 pm Pacific): `fetch` → `signals` → `paper --execu
 
 ## Roadmap
 - [x] Phase 1: data pipeline, SQLite logging, backtester, 2 baseline strategies, Alpaca paper bot, manual trade log
-- [ ] Phase 2: walk-forward / out-of-sample testing; more strategies (momentum, volatility targeting); crypto on Alpaca (`BTC/USD`)
+- [x] Phase 2a: walk-forward / out-of-sample testing; more strategies (momentum, volatility targeting)
+- [ ] Phase 2b: crypto on Alpaca (`BTC/USD`)
 - [ ] Phase 3: LLM research layer (summarize news/earnings → a signal with written reasoning, stored in `signals.reason`)
 - [ ] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
 - [ ] Phase 5: write-up of results (including what didn't work)

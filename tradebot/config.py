@@ -18,6 +18,13 @@ def load_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def _real_key(value: str | None) -> str | None:
+    """None for blanks, template placeholders, or an endpoint URL pasted by mistake."""
+    if not value or value.startswith(("your_", "http://", "https://")):
+        return None
+    return value
+
+
 def load_secrets() -> dict:
     try:
         from dotenv import load_dotenv
@@ -25,8 +32,8 @@ def load_secrets() -> dict:
     except ImportError:
         pass
     return {
-        "alpaca_key": os.getenv("ALPACA_API_KEY"),
-        "alpaca_secret": os.getenv("ALPACA_SECRET_KEY"),
+        "alpaca_key": _real_key(os.getenv("ALPACA_API_KEY")),
+        "alpaca_secret": _real_key(os.getenv("ALPACA_SECRET_KEY")),
         "alpaca_paper": os.getenv("ALPACA_PAPER", "true").lower() != "false",
         "anthropic_key": os.getenv("ANTHROPIC_API_KEY"),
     }

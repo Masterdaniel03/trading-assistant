@@ -5,6 +5,7 @@
     python main.py quote [SYMBOLS...]        # real-time bid/ask from Alpaca (free IEX feed)
     python main.py backtest SPY sma_crossover
     python main.py backtest-all              # every watchlist symbol x every strategy
+    python main.py walk-forward [SYMBOLS...] # out-of-sample test, parameters re-picked each fold
     python main.py signals                   # today's signals (what the AI suggests)
     python main.py paper                     # dry run: show orders the bot WOULD place
     python main.py paper --execute           # actually send them to Alpaca paper
@@ -29,6 +30,7 @@ from tradebot.data import (AlpacaQuotes, fetch_many, fetch_prices, history_was_r
 from tradebot.rebalance import plan_orders
 from tradebot.risk import RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed
 from tradebot.strategies import STRATEGIES, get_strategy
+from tradebot.walkforward import walk_forward
 
 REPORTS = ROOT / "reports"
 
@@ -67,16 +69,19 @@ def cmd_fetch(cfg, args):
 
 def cmd_quote(cfg, args):
     secrets = load_secrets()
-    quotes = AlpacaQuotes(secrets["alpaca_key"], secrets["alpaca_secret"]).latest(
-        args.symbols or cfg["watchlist"])
+    try:
+        quotes = AlpacaQuotes(secrets["alpaca_key"], secrets["alpaca_secret"]).latest(
+            args.symbols or cfg["watchlist"])
+    except RuntimeError as e:
+        sys.exit(str(e))
     print(f"{'symbol':<8} {'bid':>11} {'ask':>11} {'mid':>11} {'spread':>8}  time (UTC)        source")
     for q in quotes.values():
         print(f"{q.symbol:<8} {q.bid:>11,.2f} {q.ask:>11,.2f} {q.mid:>11,.2f} {q.spread_bps:>6.1f}bp"
               f"  {q.timestamp:%Y-%m-%d %H:%M:%S}  {q.source}")
 
 
-def _strategy_params(cfg, name):
-    return cfg.get("strategies", {}).get(name, {})
+def _strategy_params(cfg, name, symbol):
+    return {**cfg.get("strategies", {}).get(name, {}), "periods_per_year": periods_per_year(symbol)}
 
 
 def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
@@ -86,7 +91,7 @@ def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
     bt = cfg["backtest"]
     ppy = periods_per_year(symbol)
     strat = get_strategy(strategy_name)
-    res = run_backtest(close, strat(close, **_strategy_params(cfg, strategy_name)),
+    res = run_backtest(close, strat(close, **_strategy_params(cfg, strategy_name, symbol)),
                        name=strategy_name, initial_capital=bt["initial_capital"],
                        cost_bps=bt["cost_bps"], periods_per_year=ppy)
     bench = run_backtest(close, STRATEGIES["buy_and_hold"](close), name="buy_and_hold",
@@ -137,6 +142,46 @@ def cmd_backtest_all(cfg, args):
     print(f"\nSaved {REPORTS / 'backtest_summary.csv'}")
 
 
+def cmd_walk_forward(cfg, args):
+    conn = db.connect(cfg["db_path"])
+    wf, bt = cfg["walk_forward"], cfg["backtest"]
+    names = [args.strategy] if args.strategy else list(wf["grids"])
+    rows, skipped = [], []
+    for sym in args.symbols or cfg["watchlist"]:
+        close = db.load_close(conn, sym)
+        ppy = periods_per_year(sym)
+        for name in names:
+            try:
+                r = walk_forward(close, get_strategy(name), wf["grids"][name],
+                                 train_bars=wf["train_years"] * ppy, test_bars=wf["test_years"] * ppy,
+                                 name=name, initial_capital=bt["initial_capital"],
+                                 cost_bps=bt["cost_bps"], periods_per_year=ppy)
+            except ValueError as e:
+                skipped.append(f"{sym}/{name}: {e}")
+                continue
+            rows.append({"symbol": sym, "strategy": name, "folds": len(r.folds),
+                         "train_sharpe": r.mean_train_sharpe,
+                         "oos_sharpe": r.oos.metrics["sharpe"], "bh_sharpe": r.benchmark.metrics["sharpe"],
+                         "oos_cagr": r.oos.metrics["cagr"], "bh_cagr": r.benchmark.metrics["cagr"],
+                         "oos_max_dd": r.oos.metrics["max_drawdown"],
+                         "bh_max_dd": r.benchmark.metrics["max_drawdown"],
+                         "folds_beat_bh": r.folds_beating_benchmark})
+            if args.verbose:
+                print(f"\n{sym} {name}")
+                print(pd.DataFrame(r.folds).to_string(index=False))
+    for s in skipped:
+        print(f"Skipped {s}")
+    if not rows:
+        sys.exit("Nothing to test. Run: python main.py fetch")
+    df = pd.DataFrame(rows)
+    df["beats_bh_sharpe"] = df["oos_sharpe"] > df["bh_sharpe"]
+    REPORTS.mkdir(exist_ok=True)
+    df.to_csv(REPORTS / "walk_forward_summary.csv", index=False)
+    with pd.option_context("display.float_format", "{:.3f}".format, "display.width", 180):
+        print(df.to_string(index=False))
+    print(f"\nSaved {REPORTS / 'walk_forward_summary.csv'}")
+
+
 def _current_targets(cfg, conn, strategy_name, symbols, log=True):
     strat = get_strategy(strategy_name)
     targets = {}
@@ -144,7 +189,7 @@ def _current_targets(cfg, conn, strategy_name, symbols, log=True):
         close = db.load_close(conn, sym)
         if close.empty:
             continue
-        t = float(strat(close, **_strategy_params(cfg, strategy_name)).iloc[-1])
+        t = float(strat(close, **_strategy_params(cfg, strategy_name, sym)).iloc[-1])
         targets[sym] = t
         if log:
             db.log_signal(conn, sym, strategy_name, t,
@@ -157,9 +202,9 @@ def cmd_signals(cfg, args):
     db.init_db(conn)
     name = args.strategy or cfg["paper_bot"]["strategy"]
     targets = _current_targets(cfg, conn, name, cfg["watchlist"])
-    print(f"Signals ({name})  1 = hold/buy, 0 = stay out")
+    print(f"Signals ({name})  1 = full position, 0 = stay out")
     for sym, t in targets.items():
-        print(f"  {sym:<8} {t:.0f}")
+        print(f"  {sym:<8} {t:.2f}")
 
 
 def cmd_paper(cfg, args):
@@ -178,7 +223,10 @@ def cmd_paper(cfg, args):
     except RiskViolation as e:
         sys.exit(str(e))
 
-    broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
+    try:
+        broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
+    except RuntimeError as e:
+        sys.exit(str(e))
     acct = broker.account()
     db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
     print(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
@@ -250,6 +298,10 @@ def build_parser():
     q = sub.add_parser("quote"); q.add_argument("symbols", nargs="*")
     b = sub.add_parser("backtest"); b.add_argument("symbol"); b.add_argument("strategy", choices=list(STRATEGIES))
     sub.add_parser("backtest-all")
+    w = sub.add_parser("walk-forward", help="out-of-sample test with per-fold parameter selection")
+    w.add_argument("symbols", nargs="*")
+    w.add_argument("--strategy", choices=[n for n in STRATEGIES if n != "buy_and_hold"])
+    w.add_argument("--verbose", action="store_true", help="print each fold")
     s = sub.add_parser("signals"); s.add_argument("--strategy", choices=list(STRATEGIES))
     pp = sub.add_parser("paper"); pp.add_argument("--execute", action="store_true")
     lt = sub.add_parser("log-trade", help="record a manual (e.g. Fidelity) trade")
@@ -266,7 +318,8 @@ def build_parser():
 
 COMMANDS = {
     "init": cmd_init, "fetch": cmd_fetch, "quote": cmd_quote, "backtest": cmd_backtest,
-    "backtest-all": cmd_backtest_all, "signals": cmd_signals, "paper": cmd_paper,
+    "backtest-all": cmd_backtest_all, "walk-forward": cmd_walk_forward,
+    "signals": cmd_signals, "paper": cmd_paper,
     "log-trade": cmd_log_trade, "report": cmd_report,
 }
 

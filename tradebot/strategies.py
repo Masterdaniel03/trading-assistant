@@ -46,10 +46,26 @@ def rsi_reversion(close: pd.Series, period: int = 14, buy_below: float = 30,
     return pd.Series(target, index=close.index)
 
 
+def momentum(close: pd.Series, lookback: int = 252, skip: int = 21, **_) -> pd.Series:
+    """Time-series momentum: long when the return from `lookback` bars ago to
+    `skip` bars ago is positive. Skipping the latest month avoids short-term reversal."""
+    return (close.shift(skip) > close.shift(lookback)).astype(float)
+
+
+def vol_target(close: pd.Series, target_vol: float = 0.15, window: int = 20,
+               periods_per_year: int = 252, **_) -> pd.Series:
+    """Hold more when markets are calm: position = target_vol / realized vol,
+    capped at 1 (no leverage). Flat until `window` returns are available."""
+    realized = close.pct_change(fill_method=None).rolling(window).std() * np.sqrt(periods_per_year)
+    return (target_vol / realized).clip(upper=1.0).fillna(0.0)
+
+
 STRATEGIES = {
     "buy_and_hold": buy_and_hold,
     "sma_crossover": sma_crossover,
     "rsi_reversion": rsi_reversion,
+    "momentum": momentum,
+    "vol_target": vol_target,
 }
 
 

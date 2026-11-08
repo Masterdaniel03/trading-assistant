@@ -17,6 +17,22 @@ strategies:
     period: 14
     buy_below: 30
     sell_above: 55
+  momentum:
+    lookback: 252
+    skip: 21
+  vol_target:
+    target_vol: 0.15
+    window: 20
+
+# Out-of-sample testing: pick parameters on train_years, trade them on the next test_years.
+walk_forward:
+  train_years: 5
+  test_years: 1
+  grids:
+    sma_crossover: {fast: [20, 50], slow: [100, 200]}
+    rsi_reversion: {period: [7, 14], buy_below: [25, 30], sell_above: [50, 55, 70]}
+    momentum: {lookback: [126, 252], skip: [0, 21]}
+    vol_target: {target_vol: [0.10, 0.15, 0.20], window: [20, 60]}
 
 # Hard limits enforced by the paper/live bot before any order is sent.
 risk:
