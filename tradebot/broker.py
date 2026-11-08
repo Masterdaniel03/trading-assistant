@@ -1,5 +1,30 @@
-"""Thin wrapper around Alpaca's trading API (paper by default)."""
+"""Thin wrapper around Alpaca's trading API (paper by default).
+
+All calls are retried with backoff (see tradebot.retry). Order placement is
+made idempotent with a client_order_id: if a submit fails ambiguously (timeout,
+5xx) we look the order up before sending it again, so a flaky network can't
+double-buy.
+"""
 from __future__ import annotations
+
+import logging
+import uuid
+
+from tradebot.retry import call_with_retry, is_rate_limit, is_transient
+
+log = logging.getLogger(__name__)
+
+
+def disable_builtin_retry(client) -> None:
+    """alpaca-py retries 429 *and 504* itself with a fixed wait, which also
+    blindly re-POSTs orders on 504. Turn it off so tradebot.retry is the only
+    retry layer (exponential backoff, Retry-After, idempotent orders)."""
+    if hasattr(client, "_retry"):
+        client._retry = 0
+
+
+def _status(exc) -> int | None:
+    return getattr(exc, "status_code", None)
 
 
 class AlpacaBroker:
@@ -9,33 +34,91 @@ class AlpacaBroker:
         from alpaca.trading.client import TradingClient
         self.paper = paper
         self.client = TradingClient(key, secret, paper=paper)
+        disable_builtin_retry(self.client)
 
     @property
     def account_name(self) -> str:
         return "alpaca_paper" if self.paper else "alpaca_live"
 
+    # ---------------------------------------------------------------- reads
+
     def account(self) -> dict:
-        a = self.client.get_account()
+        a = call_with_retry(self.client.get_account, what="alpaca account")
         return {"equity": float(a.equity), "last_equity": float(a.last_equity),
                 "cash": float(a.cash), "status": str(a.status)}
 
     def positions(self) -> dict[str, float]:
         """symbol -> current market value in $."""
-        return {p.symbol: float(p.market_value) for p in self.client.get_all_positions()}
+        ps = call_with_retry(self.client.get_all_positions, what="alpaca positions")
+        return {p.symbol: float(p.market_value) for p in ps}
 
     def is_market_open(self) -> bool:
-        return bool(self.client.get_clock().is_open)
+        return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)
 
-    def submit_notional(self, symbol: str, side: str, notional: float):
+    def _order_by_client_id(self, client_order_id: str):
+        try:
+            return self.client.get_order_by_client_id(client_order_id)
+        except Exception as exc:  # noqa: BLE001
+            if _status(exc) == 404:
+                return None
+            raise
+
+    # ---------------------------------------------------------------- writes
+
+    def submit_notional(self, symbol: str, side: str, notional: float,
+                        client_order_id: str | None = None):
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest
+
+        coid = client_order_id or f"tb-{uuid.uuid4().hex[:24]}"
         req = MarketOrderRequest(
             symbol=symbol,
             notional=round(notional, 2),
             side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
+            client_order_id=coid,
         )
-        return self.client.submit_order(req)
+
+        def attempt():
+            try:
+                return self.client.submit_order(req)
+            except Exception as exc:  # noqa: BLE001
+                # 429 = rejected before processing, safe to resend as-is.
+                # Anything else that might have reached the server: check first.
+                if not is_rate_limit(exc) and (is_transient(exc) or _status(exc) == 422):
+                    existing = call_with_retry(self._order_by_client_id, coid,
+                                               what="alpaca order lookup")
+                    if existing is not None:
+                        log.info("order %s already accepted (%s); not resending", coid, existing.id)
+                        return existing
+                raise
+
+        return call_with_retry(attempt, what=f"alpaca submit {side} {symbol}")
 
     def close_position(self, symbol: str):
-        return self.client.close_position(symbol)
+        def attempt():
+            try:
+                return self.client.close_position(symbol)
+            except Exception as exc:  # noqa: BLE001
+                if not is_rate_limit(exc) and is_transient(exc):
+                    # The close may have gone through; don't send a second one.
+                    pending = call_with_retry(self._close_in_flight, symbol,
+                                              what="alpaca close check")
+                    if pending:
+                        log.info("close for %s already accepted; not resending", symbol)
+                        return pending
+                raise
+
+        return call_with_retry(attempt, what=f"alpaca close {symbol}")
+
+    def _close_in_flight(self, symbol: str):
+        """Return an open closing order for `symbol` (or True if the position
+        is already gone), else None."""
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        if symbol not in {p.symbol for p in self.client.get_all_positions()}:
+            return True
+        orders = self.client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN,
+                                                         symbols=[symbol]))
+        return next(iter(orders), None)

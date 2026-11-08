@@ -2,6 +2,7 @@
 
     python main.py init                      # create database
     python main.py fetch                     # download/refresh prices for watchlist
+    python main.py quote [SYMBOLS...]        # real-time bid/ask from Alpaca (free IEX feed)
     python main.py backtest SPY sma_crossover
     python main.py backtest-all              # every watchlist symbol x every strategy
     python main.py signals                   # today's signals (what the AI suggests)
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -21,7 +23,7 @@ import pandas as pd
 from tradebot import db
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest
 from tradebot.config import ROOT, load_config, load_secrets
-from tradebot.data import fetch_prices, periods_per_year
+from tradebot.data import AlpacaQuotes, fetch_many, periods_per_year
 from tradebot.rebalance import plan_orders
 from tradebot.risk import RiskViolation, check_daily_loss, check_live_allowed
 from tradebot.strategies import STRATEGIES, get_strategy
@@ -39,10 +41,26 @@ def cmd_fetch(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
     symbols = args.symbols or cfg["watchlist"]
-    for sym in symbols:
-        df = fetch_prices(sym, start=cfg["start_date"])
-        n = db.upsert_prices(conn, df) if not df.empty else 0
+    failed = []
+    for sym, result in fetch_many(symbols, start=cfg["start_date"]):
+        if isinstance(result, Exception):
+            failed.append(sym)
+            print(f"{sym:<8} FAILED  {type(result).__name__}: {result}")
+            continue
+        n = db.upsert_prices(conn, result) if not result.empty else 0
         print(f"{sym:<8} {n:>5} rows  (latest: {db.last_price_date(conn, sym)})")
+    if failed:
+        sys.exit(f"Fetch failed for {', '.join(failed)} (see errors above).")
+
+
+def cmd_quote(cfg, args):
+    secrets = load_secrets()
+    quotes = AlpacaQuotes(secrets["alpaca_key"], secrets["alpaca_secret"]).latest(
+        args.symbols or cfg["watchlist"])
+    print(f"{'symbol':<8} {'bid':>11} {'ask':>11} {'mid':>11} {'spread':>8}  time (UTC)        source")
+    for q in quotes.values():
+        print(f"{q.symbol:<8} {q.bid:>11,.2f} {q.ask:>11,.2f} {q.mid:>11,.2f} {q.spread_bps:>6.1f}bp"
+              f"  {q.timestamp:%Y-%m-%d %H:%M:%S}  {q.source}")
 
 
 def _strategy_params(cfg, name):
@@ -199,6 +217,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     f = sub.add_parser("fetch"); f.add_argument("symbols", nargs="*")
+    q = sub.add_parser("quote"); q.add_argument("symbols", nargs="*")
     b = sub.add_parser("backtest"); b.add_argument("symbol"); b.add_argument("strategy", choices=list(STRATEGIES))
     sub.add_parser("backtest-all")
     s = sub.add_parser("signals"); s.add_argument("--strategy", choices=list(STRATEGIES))
@@ -216,11 +235,12 @@ def build_parser():
 
 
 COMMANDS = {
-    "init": cmd_init, "fetch": cmd_fetch, "backtest": cmd_backtest,
+    "init": cmd_init, "fetch": cmd_fetch, "quote": cmd_quote, "backtest": cmd_backtest,
     "backtest-all": cmd_backtest_all, "signals": cmd_signals, "paper": cmd_paper,
     "log-trade": cmd_log_trade, "report": cmd_report,
 }
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args()
     COMMANDS[args.cmd](load_config(), args)

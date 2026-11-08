@@ -35,6 +35,7 @@ python main.py fetch
 | Command | What it does |
 |---|---|
 | `python main.py fetch [SYMBOLS...]` | Download/refresh daily prices for the watchlist |
+| `python main.py quote [SYMBOLS...]` | Real-time bid/ask from Alpaca (free IEX feed for stocks; crypto needs no keys) |
 | `python main.py backtest SPY sma_crossover` | Backtest one strategy vs buy & hold, save chart to `reports/` |
 | `python main.py backtest-all` | Every watchlist symbol × strategy → `reports/backtest_summary.csv` |
 | `python main.py signals` | Today's target positions (also logged to the DB) |
@@ -42,7 +43,7 @@ python main.py fetch
 | `python main.py paper --execute` | Sends those orders to Alpaca paper |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
-| `pytest` | Run tests (look-ahead check, costs, risk limits, DB) |
+| `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, DB) |
 
 Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
 
