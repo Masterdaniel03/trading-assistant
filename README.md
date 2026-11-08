@@ -34,7 +34,7 @@ python main.py fetch
 
 | Command | What it does |
 |---|---|
-| `python main.py fetch [SYMBOLS...]` | Download/refresh daily prices for the watchlist |
+| `python main.py fetch [SYMBOLS...] [--full]` | Download/refresh daily prices (resumes from the last stored date; refetches full history automatically after a split/dividend re-adjustment) |
 | `python main.py quote [SYMBOLS...]` | Real-time bid/ask from Alpaca (free IEX feed for stocks; crypto needs no keys) |
 | `python main.py backtest SPY sma_crossover` | Backtest one strategy vs buy & hold, save chart to `reports/` |
 | `python main.py backtest-all` | Every watchlist symbol × strategy → `reports/backtest_summary.csv` |
@@ -50,6 +50,8 @@ Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
 - Max 20% of equity in any one symbol, no margin, and no new orders after a 3% daily loss.
+- `paper` refuses to run if any bot symbol's prices are missing or older than `risk.max_data_age_days` (default 4).
+- Positions in the paper account that aren't in `paper_bot.symbols` are closed (`paper_bot.close_unlisted`).
 - `paper` is a dry run unless you pass `--execute`.
 - Never commit `.env`. Never give any key withdrawal permissions.
 

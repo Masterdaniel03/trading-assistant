@@ -112,13 +112,13 @@ class AlpacaBroker:
         return call_with_retry(attempt, what=f"alpaca close {symbol}")
 
     def _close_in_flight(self, symbol: str):
-        """Return an open closing order for `symbol` (or True if the position
-        is already gone), else None."""
-        from alpaca.trading.enums import QueryOrderStatus
+        """Return an open *sell* order for `symbol` (or True if the position
+        is already gone), else None. A pending buy must not count as a close."""
+        from alpaca.trading.enums import OrderSide, QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
 
         if symbol not in {p.symbol for p in self.client.get_all_positions()}:
             return True
         orders = self.client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN,
                                                          symbols=[symbol]))
-        return next(iter(orders), None)
+        return next((o for o in orders if o.side == OrderSide.SELL), None)

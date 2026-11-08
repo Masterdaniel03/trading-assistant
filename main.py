@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -23,9 +24,10 @@ import pandas as pd
 from tradebot import db
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest
 from tradebot.config import ROOT, load_config, load_secrets
-from tradebot.data import AlpacaQuotes, fetch_many, periods_per_year
+from tradebot.data import (AlpacaQuotes, fetch_many, fetch_prices, history_was_readjusted,
+                           incremental_start, periods_per_year)
 from tradebot.rebalance import plan_orders
-from tradebot.risk import RiskViolation, check_daily_loss, check_live_allowed
+from tradebot.risk import RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed
 from tradebot.strategies import STRATEGIES, get_strategy
 
 REPORTS = ROOT / "reports"
@@ -41,8 +43,18 @@ def cmd_fetch(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
     symbols = args.symbols or cfg["watchlist"]
+    full_start = cfg["start_date"]
+    starts = ({s: full_start for s in symbols} if args.full else
+              {s: incremental_start(db.last_price_date(conn, s), full_start) for s in symbols})
     failed = []
-    for sym, result in fetch_many(symbols, start=cfg["start_date"]):
+    for sym, result in fetch_many(symbols, start=starts):
+        if not isinstance(result, Exception) and starts[sym] != full_start \
+                and history_was_readjusted(db.load_close(conn, sym), result):
+            print(f"{sym:<8} history re-adjusted (split/dividend); refetching from {full_start}")
+            try:
+                result = fetch_prices(sym, full_start)
+            except Exception as exc:  # noqa: BLE001 - reported below
+                result = exc
         if isinstance(result, Exception):
             failed.append(sym)
             print(f"{sym:<8} FAILED  {type(result).__name__}: {result}")
@@ -70,7 +82,7 @@ def _strategy_params(cfg, name):
 def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
     close = db.load_close(conn, symbol)
     if close.empty:
-        sys.exit(f"No prices for {symbol}. Run: python main.py fetch")
+        raise LookupError(f"No prices for {symbol}. Run: python main.py fetch {symbol}")
     bt = cfg["backtest"]
     ppy = periods_per_year(symbol)
     strat = get_strategy(strategy_name)
@@ -90,15 +102,21 @@ def _backtest_one(cfg, conn, symbol, strategy_name, plot=True):
 
 def cmd_backtest(cfg, args):
     conn = db.connect(cfg["db_path"])
-    res, bench = _backtest_one(cfg, conn, args.symbol, args.strategy)
+    try:
+        res, bench = _backtest_one(cfg, conn, args.symbol, args.strategy)
+    except LookupError as e:
+        sys.exit(str(e))
     print(f"\n{args.symbol}  {res.equity.index[0].date()} -> {res.equity.index[-1].date()}")
     print(format_metrics(compare([res, bench])).to_string())
 
 
 def cmd_backtest_all(cfg, args):
     conn = db.connect(cfg["db_path"])
-    rows = []
+    rows, skipped = [], []
     for sym in cfg["watchlist"]:
+        if db.last_price_date(conn, sym) is None:
+            skipped.append(sym)
+            continue
         for name in STRATEGIES:
             if name == "buy_and_hold":
                 continue
@@ -106,6 +124,10 @@ def cmd_backtest_all(cfg, args):
             rows.append({"symbol": sym, "strategy": name,
                          **{f"strat_{k}": v for k, v in res.metrics.items() if k in ("cagr", "sharpe", "max_drawdown")},
                          **{f"bh_{k}": v for k, v in bench.metrics.items() if k in ("cagr", "sharpe", "max_drawdown")}})
+    if skipped:
+        print(f"Skipped (no prices, run `python main.py fetch`): {', '.join(skipped)}\n")
+    if not rows:
+        sys.exit("Nothing to backtest.")
     df = pd.DataFrame(rows)
     df["beats_bh_sharpe"] = df["strat_sharpe"] > df["bh_sharpe"]
     REPORTS.mkdir(exist_ok=True)
@@ -146,10 +168,17 @@ def cmd_paper(cfg, args):
     secrets = load_secrets()
     risk = cfg["risk"]
     check_live_allowed(secrets["alpaca_paper"], risk)
-    broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
+    pb = cfg["paper_bot"]
 
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
+    try:
+        check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
+                         date.today(), risk)
+    except RiskViolation as e:
+        sys.exit(str(e))
+
+    broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
     acct = broker.account()
     db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
     print(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
@@ -159,9 +188,9 @@ def cmd_paper(cfg, args):
     except RiskViolation as e:
         sys.exit(str(e))
 
-    pb = cfg["paper_bot"]
     targets = _current_targets(cfg, conn, pb["strategy"], pb["symbols"])
-    orders = plan_orders(targets, broker.positions(), acct["equity"], risk)
+    orders = plan_orders(targets, broker.positions(), acct["equity"], risk,
+                         close_unlisted=pb.get("close_unlisted", True))
     if not orders:
         print("Portfolio already on target. No orders.")
         return
@@ -217,6 +246,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     f = sub.add_parser("fetch"); f.add_argument("symbols", nargs="*")
+    f.add_argument("--full", action="store_true", help="re-download full history instead of resuming")
     q = sub.add_parser("quote"); q.add_argument("symbols", nargs="*")
     b = sub.add_parser("backtest"); b.add_argument("symbol"); b.add_argument("strategy", choices=list(STRATEGIES))
     sub.add_parser("backtest-all")

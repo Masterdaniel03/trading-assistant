@@ -95,12 +95,21 @@ def last_price_date(conn: sqlite3.Connection, symbol: str) -> str | None:
 
 
 # ---------- signals / trades / equity ----------
-def log_signal(conn, symbol, strategy, target, reason=None) -> None:
+def log_signal(conn, symbol, strategy, target, reason=None) -> bool:
+    """Record a signal. Skips (returns False) if it repeats the latest signal
+    for this symbol/strategy, so re-running `signals` doesn't add duplicates."""
+    last = conn.execute(
+        "SELECT target, reason FROM signals WHERE symbol = ? AND strategy = ? "
+        "ORDER BY id DESC LIMIT 1", (symbol, strategy),
+    ).fetchone()
+    if last is not None and last[0] == float(target) and last[1] == reason:
+        return False
     conn.execute(
         "INSERT INTO signals (ts, symbol, strategy, target, reason) VALUES (?,?,?,?,?)",
         (now_utc(), symbol, strategy, float(target), reason),
     )
     conn.commit()
+    return True
 
 
 def log_trade(conn, account, symbol, side, qty=None, notional=None, price=None,

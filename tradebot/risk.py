@@ -1,6 +1,10 @@
 """Risk limits applied before any order reaches a broker."""
 from __future__ import annotations
 
+from datetime import date
+
+DEFAULT_MAX_DATA_AGE_DAYS = 4  # Fri close -> Tue morning after a Monday holiday
+
 
 class RiskViolation(Exception):
     pass
@@ -18,6 +22,28 @@ def check_daily_loss(equity: float, last_equity: float, risk: dict) -> None:
     if last_equity and (equity / last_equity - 1) <= -risk["daily_loss_limit_pct"]:
         raise RiskViolation(
             f"Daily loss limit hit ({equity / last_equity - 1:.2%}); no new orders today."
+        )
+
+
+def check_data_fresh(last_dates: dict[str, str | None], today: date, risk: dict) -> None:
+    """Refuse to trade on missing or stale prices.
+
+    last_dates: symbol -> latest stored price date (YYYY-MM-DD) or None.
+    Without this, a failed `fetch` would silently trade on old signals, and a
+    symbol with no data at all would be treated as 'target 0' and sold.
+    """
+    max_age = risk.get("max_data_age_days", DEFAULT_MAX_DATA_AGE_DAYS)
+    problems = []
+    for sym, d in last_dates.items():
+        if d is None:
+            problems.append(f"{sym} (no data)")
+            continue
+        age = (today - date.fromisoformat(d)).days
+        if age > max_age:
+            problems.append(f"{sym} (last close {d}, {age} days old)")
+    if problems:
+        raise RiskViolation(
+            f"Stale or missing prices: {', '.join(problems)}. Run `python main.py fetch` first."
         )
 
 

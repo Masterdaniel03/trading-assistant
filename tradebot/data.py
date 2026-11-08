@@ -53,19 +53,54 @@ def fetch_prices(symbol: str, start: str, end: str | None = None) -> pd.DataFram
     return out
 
 
-def fetch_many(symbols: list[str], start: str, end: str | None = None,
+def fetch_many(symbols: list[str], start: str | dict[str, str], end: str | None = None,
                spacing_s: float = YF_REQUEST_SPACING_S):
     """Yield (symbol, DataFrame | Exception) for each symbol, paced politely.
 
+    `start` is one date for all symbols, or a {symbol: date} dict.
     One bad symbol doesn't abort the batch; its exception is yielded instead.
     """
     for i, sym in enumerate(symbols):
         if i and spacing_s:
             time.sleep(spacing_s)
         try:
-            yield sym, fetch_prices(sym, start, end)
+            sym_start = start[sym] if isinstance(start, dict) else start
+            yield sym, fetch_prices(sym, sym_start, end)
         except Exception as exc:  # noqa: BLE001 - reported to caller
             yield sym, exc
+
+
+# ---------------------------------------------------------------- incremental
+
+INCREMENTAL_OVERLAP_DAYS = 10
+
+
+def incremental_start(last_date: str | None, full_start: str,
+                      overlap_days: int = INCREMENTAL_OVERLAP_DAYS) -> str:
+    """Where to resume downloading: a few days before the last stored date
+    (the overlap lets us detect re-adjusted history), or full_start if empty."""
+    if not last_date:
+        return full_start
+    resume = (pd.Timestamp(last_date) - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
+    return max(full_start, resume)
+
+
+def history_was_readjusted(stored: pd.Series, fresh: pd.DataFrame, rel_tol: float = 1e-4) -> bool:
+    """True if overlapping closes differ, meaning Yahoo re-adjusted the whole
+    history (a split or dividend) and the stored series must be refetched.
+
+    `stored` is a date-indexed close series; its last bar is ignored because it
+    may have been an in-progress intraday bar when it was saved. No overlap to
+    compare also counts as True, since consistency can't be verified.
+    """
+    stored = stored.iloc[:-1]
+    if fresh.empty or stored.empty:
+        return not fresh.empty
+    new = fresh.set_index(pd.to_datetime(fresh["date"]))["close"].astype(float)
+    common = stored.index.intersection(new.index)
+    if len(common) == 0:
+        return True
+    return bool(((new[common] / stored[common]) - 1).abs().gt(rel_tol).any())
 
 
 # ---------------------------------------------------------------- real-time

@@ -24,8 +24,10 @@ risk:
   max_total_exposure_pct: 1.0  # no margin
   daily_loss_limit_pct: 0.03   # stop trading for the day after a 3% drawdown
   min_order_notional: 1.0      # Alpaca fractional minimum is $1
+  max_data_age_days: 4         # refuse to trade if any bot symbol's last close is older
   allow_live: false            # flip ONLY after months of paper results
 
 paper_bot:
   strategy: sma_crossover
   symbols: [SPY, QQQ, AAPL, MSFT, NVDA]   # stocks only for now
+  close_unlisted: true   # sell positions in the paper account that aren't in `symbols`
