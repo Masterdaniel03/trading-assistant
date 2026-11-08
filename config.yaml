@@ -1,0 +1,31 @@
+# ---- Trading Assistant config ----
+# Symbols use Yahoo Finance tickers (crypto: BTC-USD, ETH-USD).
+watchlist: [SPY, QQQ, AAPL, MSFT, NVDA, BTC-USD]
+benchmark: SPY
+start_date: "2015-01-01"
+db_path: data/trading.db
+
+backtest:
+  initial_capital: 4000      # mirrors the real stake
+  cost_bps: 5                # assumed cost per trade (slippage + spread), in basis points
+
+strategies:
+  sma_crossover:
+    fast: 50
+    slow: 200
+  rsi_reversion:
+    period: 14
+    buy_below: 30
+    sell_above: 55
+
+# Hard limits enforced by the paper/live bot before any order is sent.
+risk:
+  max_position_pct: 0.20       # no single symbol above 20% of equity
+  max_total_exposure_pct: 1.0  # no margin
+  daily_loss_limit_pct: 0.03   # stop trading for the day after a 3% drawdown
+  min_order_notional: 1.0      # Alpaca fractional minimum is $1
+  allow_live: false            # flip ONLY after months of paper results
+
+paper_bot:
+  strategy: sma_crossover
+  symbols: [SPY, QQQ, AAPL, MSFT, NVDA]   # stocks only for now
