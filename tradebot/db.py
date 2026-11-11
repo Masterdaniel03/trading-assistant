@@ -91,14 +91,15 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
 def load_close(conn: sqlite3.Connection, symbol: str) -> pd.Series:
     df = pd.read_sql_query(
-        "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date",
+        "SELECT date, close FROM prices WHERE symbol = ? AND close IS NOT NULL ORDER BY date",
         conn, params=(symbol,), parse_dates=["date"],
     )
     return df.set_index("date")["close"].rename(symbol)
 
 
 def last_price_date(conn: sqlite3.Connection, symbol: str) -> str | None:
-    row = conn.execute("SELECT MAX(date) FROM prices WHERE symbol = ?", (symbol,)).fetchone()
+    row = conn.execute("SELECT MAX(date) FROM prices WHERE symbol = ? AND close IS NOT NULL",
+                       (symbol,)).fetchone()
     return row[0] if row else None
 
 

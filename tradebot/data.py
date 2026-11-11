@@ -50,7 +50,36 @@ def fetch_prices(symbol: str, start: str, end: str | None = None) -> pd.DataFram
     out = hist.rename(columns=str.lower)[PRICE_COLUMNS[2:]]
     out.insert(0, "date", dates)
     out.insert(0, "symbol", symbol)
-    return out
+    # A missing close would turn into "no signal" and make the bot sell.
+    return out.dropna(subset=["close"]).reset_index(drop=True)
+
+
+# Yahoo serves today's bar while it is still forming. Storing it would mean
+# signals built on a price that is not a close, labelled as one.
+STOCK_BAR_FINAL_NY = pd.Timedelta(hours=16, minutes=15)  # 15 min after the close
+
+
+def first_incomplete_date(symbol: str, now: pd.Timestamp | None = None) -> str:
+    """Earliest date (YYYY-MM-DD) whose daily bar is not final yet.
+
+    Crypto bars run midnight to midnight UTC, so today's is always unfinished.
+    A stock's bar for today is unfinished until shortly after the New York close.
+    """
+    now = pd.Timestamp.now(tz="UTC") if now is None else now
+    if is_crypto(symbol):
+        return now.tz_convert("UTC").strftime("%Y-%m-%d")
+    ny = now.tz_convert("America/New_York")
+    today = ny.normalize()
+    day = today if ny < today + STOCK_BAR_FINAL_NY else today + pd.Timedelta(days=1)
+    return day.strftime("%Y-%m-%d")
+
+
+def drop_incomplete_bars(df: pd.DataFrame, symbol: str,
+                         now: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Keep only bars that are final."""
+    if df.empty:
+        return df
+    return df[df["date"] < first_incomplete_date(symbol, now)].reset_index(drop=True)
 
 
 def fetch_many(symbols: list[str], start: str | dict[str, str], end: str | None = None,
@@ -123,7 +152,10 @@ class Quote:
 
     @property
     def spread_bps(self) -> float:
-        return (self.ask - self.bid) / self.mid * 1e4 if self.mid else float("nan")
+        """NaN when a side is missing (closed market, thin feed): no real spread."""
+        if self.bid > 0 and self.ask > 0:
+            return (self.ask - self.bid) / self.mid * 1e4
+        return float("nan")
 
 
 def to_alpaca_symbol(symbol: str) -> str:

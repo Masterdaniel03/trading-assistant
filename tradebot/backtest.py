@@ -97,6 +97,7 @@ def format_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["total_return", "cagr", "ann_vol", "max_drawdown", "exposure"]:
         out[c] = out[c].map(lambda x: f"{x:+.1%}" if c != "ann_vol" and c != "exposure" else f"{x:.1%}")
     out["sharpe"] = out["sharpe"].map(lambda x: f"{x:.2f}")
+    out["trades"] = out["trades"].map(lambda x: f"{x:.0f}")
     out["final_equity"] = out["final_equity"].map(lambda x: f"${x:,.0f}")
     return out
 

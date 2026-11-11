@@ -25,8 +25,8 @@ import pandas as pd
 from tradebot import db
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest, with_stop_loss
 from tradebot.config import ROOT, load_config, load_secrets
-from tradebot.data import (AlpacaQuotes, fetch_many, fetch_prices, history_was_readjusted,
-                           incremental_start, periods_per_year)
+from tradebot.data import (AlpacaQuotes, drop_incomplete_bars, fetch_many, fetch_prices,
+                           history_was_readjusted, incremental_start, periods_per_year)
 from tradebot.rebalance import plan_orders
 from tradebot.risk import (RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed,
                            stop_loss_pct, triggered_stops)
@@ -62,8 +62,10 @@ def cmd_fetch(cfg, args):
             failed.append(sym)
             print(f"{sym:<8} FAILED  {type(result).__name__}: {result}")
             continue
-        n = db.upsert_prices(conn, result) if not result.empty else 0
-        print(f"{sym:<8} {n:>5} rows  (latest: {db.last_price_date(conn, sym)})")
+        final = drop_incomplete_bars(result, sym)
+        n = db.upsert_prices(conn, final) if not final.empty else 0
+        note = "; today's bar is not final yet, so it was left out" if len(final) < len(result) else ""
+        print(f"{sym:<8} {n:>5} rows  (latest: {db.last_price_date(conn, sym)}{note})")
     if failed:
         sys.exit(f"Fetch failed for {', '.join(failed)} (see errors above).")
 
@@ -77,8 +79,14 @@ def cmd_quote(cfg, args):
         sys.exit(str(e))
     print(f"{'symbol':<8} {'bid':>11} {'ask':>11} {'mid':>11} {'spread':>8}  time (UTC)        source")
     for q in quotes.values():
-        print(f"{q.symbol:<8} {q.bid:>11,.2f} {q.ask:>11,.2f} {q.mid:>11,.2f} {q.spread_bps:>6.1f}bp"
+        spread = f"{q.spread_bps:>6.1f}bp" if q.bid > 0 and q.ask > 0 else f"{'n/a':>8}"
+        print(f"{q.symbol:<8} {_price(q.bid)} {_price(q.ask)} {q.mid:>11,.2f} {spread}"
               f"  {q.timestamp:%Y-%m-%d %H:%M:%S}  {q.source}")
+
+
+def _price(value: float) -> str:
+    """A missing bid or ask comes back as 0; show a dash rather than $0.00."""
+    return f"{value:>11,.2f}" if value > 0 else f"{'-':>11}"
 
 
 def _strategy_params(cfg, name, symbol):

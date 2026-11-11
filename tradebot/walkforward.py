@@ -86,7 +86,8 @@ def walk_forward(close: pd.Series, strategy: Callable, grid: dict[str, list], *,
         records.append({"train_start": close.index[fold.train_start],
                         "test_start": close.index[fold.test_start],
                         "test_end": close.index[fold.test_end - 1],
-                        "params": best, "train_sharpe": best_sharpe})
+                        "params": best,
+                        "train_sharpe": best_sharpe if best_sharpe > float("-inf") else float("nan")})
 
     oos_close = close.iloc[folds[0].test_start:]
     oos = run_backtest(oos_close, pd.concat(pieces), name=name, **costs)
