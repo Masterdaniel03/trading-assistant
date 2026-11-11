@@ -60,6 +60,39 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     cash    REAL,
     PRIMARY KEY (ts, account)
 );
+
+CREATE TABLE IF NOT EXISTS news (
+    id         TEXT NOT NULL,      -- the provider's article id
+    symbol     TEXT NOT NULL,
+    created_at TEXT NOT NULL,      -- UTC
+    headline   TEXT NOT NULL,
+    summary    TEXT,
+    source     TEXT,
+    url        TEXT,
+    PRIMARY KEY (id, symbol)
+);
+
+-- One row per research attempt, kept or not, so every LLM answer can be audited.
+CREATE TABLE IF NOT EXISTS research (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    as_of         TEXT NOT NULL,   -- latest price date the model was shown
+    model         TEXT NOT NULL,
+    cache_key     TEXT NOT NULL,   -- same inputs => same key, so a repeat run reuses the answer
+    status        TEXT NOT NULL,   -- ok | no_news | rejected | error
+    detail        TEXT,            -- why it was rejected or failed
+    stance        TEXT,            -- bullish | neutral | bearish
+    confidence    REAL,
+    target        REAL,
+    summary       TEXT,
+    reasoning     TEXT,
+    risks         TEXT,            -- JSON list
+    sources       TEXT,            -- JSON list of the cited headlines
+    news_ids      TEXT,            -- JSON list of every article shown to the model
+    input_tokens  INTEGER,
+    output_tokens INTEGER
+);
 """
 
 
@@ -185,3 +218,45 @@ def log_equity(conn, account, equity, cash=None) -> None:
 
 def trades_df(conn) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM trades ORDER BY ts", conn)
+
+
+# ---------- news / research ----------
+def save_news(conn, items) -> None:
+    """items: objects with id, symbol, created_at, headline, summary, source, url."""
+    conn.executemany(
+        "INSERT OR REPLACE INTO news VALUES (?,?,?,?,?,?,?)",
+        [(i.id, i.symbol, i.created_at.isoformat(timespec="seconds"), i.headline, i.summary,
+          i.source, i.url) for i in items],
+    )
+    conn.commit()
+
+
+RESEARCH_FIELDS = ("symbol", "as_of", "model", "cache_key", "status", "detail", "stance",
+                   "confidence", "target", "summary", "reasoning", "risks", "sources",
+                   "news_ids", "input_tokens", "output_tokens")
+
+
+def save_research(conn, **fields) -> int:
+    unknown = set(fields) - set(RESEARCH_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown research fields: {sorted(unknown)}")
+    names = ["ts", *fields]
+    cur = conn.execute(
+        f"INSERT INTO research ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+        (now_utc(), *fields.values()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def find_research(conn, cache_key: str) -> dict | None:
+    """The latest kept answer for exactly these inputs, if there is one."""
+    cur = conn.execute(
+        "SELECT * FROM research WHERE cache_key = ? AND status = 'ok' ORDER BY id DESC LIMIT 1",
+        (cache_key,))
+    row = cur.fetchone()
+    return dict(zip([c[0] for c in cur.description], row)) if row else None
+
+
+def research_df(conn) -> pd.DataFrame:
+    return pd.read_sql_query("SELECT * FROM research ORDER BY id", conn)

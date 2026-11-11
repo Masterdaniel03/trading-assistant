@@ -39,7 +39,8 @@ def _status_code(exc: BaseException) -> int | None:
         code = getattr(obj, "status_code", None)
         if isinstance(code, int):
             return code
-    return None
+    code = getattr(exc, "code", None)   # google-genai errors carry the HTTP status here
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _retry_after(exc: BaseException) -> float | None:
@@ -65,10 +66,12 @@ def is_transient(exc: BaseException) -> bool:
         return True
     if _status_code(exc) in TRANSIENT_STATUS:
         return True
-    # requests / curl_cffi (used by yfinance) don't subclass the builtins
+    # requests / curl_cffi (yfinance) and httpx (Gemini) don't subclass the builtins
     name = type(exc).__name__
     return name in {"ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout",
-                    "ChunkedEncodingError", "RequestsError", "CurlError"}
+                    "ChunkedEncodingError", "RequestsError", "CurlError",
+                    "ConnectError", "ReadError", "WriteTimeout", "PoolTimeout",
+                    "RemoteProtocolError"}
 
 
 def is_retryable(exc: BaseException) -> bool:

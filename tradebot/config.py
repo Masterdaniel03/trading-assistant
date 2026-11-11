@@ -35,5 +35,5 @@ def load_secrets() -> dict:
         "alpaca_key": _real_key(os.getenv("ALPACA_API_KEY")),
         "alpaca_secret": _real_key(os.getenv("ALPACA_SECRET_KEY")),
         "alpaca_paper": os.getenv("ALPACA_PAPER", "true").lower() != "false",
-        "anthropic_key": os.getenv("ANTHROPIC_API_KEY"),
+        "gemini_key": _real_key(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")),
     }

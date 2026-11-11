@@ -7,6 +7,8 @@
     python main.py backtest-all              # every watchlist symbol x every strategy
     python main.py walk-forward [SYMBOLS...] # out-of-sample test, parameters re-picked each fold
     python main.py signals                   # today's signals (what the AI suggests)
+    python main.py research [SYMBOLS...]     # LLM reads recent news, writes a stance with reasons
+    python main.py research-score            # how past research notes compare with later prices
     python main.py paper                     # dry run: show orders the bot WOULD place
     python main.py paper --execute           # actually send them to Alpaca paper
     python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "SMA signal"
@@ -17,7 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -227,6 +229,77 @@ def cmd_signals(cfg, args):
         print(f"  {sym:<8} {t:.2f}")
 
 
+def cmd_research(cfg, args):
+    """Advisory only: notes are logged and scored, and the bot does not trade on them."""
+    from tradebot import research
+    from tradebot.llm import DEFAULT_MODEL, GeminiLLM
+    from tradebot.news import AlpacaNews, select_items
+
+    rc = cfg.get("research", {})
+    secrets = load_secrets()
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    symbols = args.symbols or cfg["watchlist"]
+    since = datetime.now(timezone.utc) - timedelta(days=rc.get("news_lookback_days", 3))
+    try:
+        news = AlpacaNews(secrets["alpaca_key"], secrets["alpaca_secret"])
+        llm = None if args.show_prompt else GeminiLLM(secrets["gemini_key"],
+                                                      rc.get("model", DEFAULT_MODEL))
+    except RuntimeError as e:
+        sys.exit(str(e))
+
+    def recent_news(sym):
+        return select_items(news.recent(sym, since), rc.get("max_news_items", 12))
+
+    if args.show_prompt:   # show exactly what the model would be sent, and call nothing
+        for sym in symbols:
+            close = db.load_close(conn, sym)
+            prompt = None if close.empty else research.prompt_for(
+                sym, close, recent_news(sym), periods_per_year(sym))
+            print(prompt or f"{sym}: no prices or no recent news, so nothing would be sent.")
+            print("-" * 72)
+        return
+
+    with RunLog(LOGS / "research.log", f"research ({llm.model})") as say:
+        for sym in symbols:
+            close = db.load_close(conn, sym)
+            if close.empty:
+                say(f"{sym}  no prices stored. Run: python main.py fetch {sym}")
+                continue
+            try:
+                items = recent_news(sym)
+            except Exception as e:  # noqa: BLE001 - one symbol's news must not stop the rest
+                say(f"{sym}  could not get news: {type(e).__name__}: {e}")
+                continue
+            db.save_news(conn, items)
+            note = research.research_symbol(conn, sym, close, items, llm,
+                                            periods_per_year(sym), refresh=args.refresh)
+            say(research.render(note))
+            say()
+            if note.rate_limited:
+                say("Gemini's rate limit was hit and the retries ran out, so the remaining "
+                    "symbols were skipped. Try again later.")
+                break
+        say("Advisory only: these notes are logged and scored. The bot does not trade on them.")
+
+
+def cmd_research_score(cfg, args):
+    from tradebot import research
+
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    table = research.score(conn)
+    if table["notes"].sum() == 0:
+        print("No research notes kept yet. Run: python main.py research")
+        return
+    print("Average return after each kind of note. A note is scored from the first close")
+    print("after it was written, over the next 1, 5 and 20 bars.\n")
+    with pd.option_context("display.float_format", "{:+.2%}".format, "display.width", 140):
+        print(table.to_string(index=False))
+    if table[[c for c in table if c.startswith("scored_")]].to_numpy().sum() == 0:
+        print("\nNone are old enough to score yet. Check back after a few trading days.")
+
+
 def _in_cooldown(conn, symbol, risk) -> bool:
     stopped = db.last_stop_date(conn, symbol)
     if stopped is None:
@@ -406,6 +479,12 @@ def build_parser():
     w.add_argument("--verbose", action="store_true", help="print each fold")
     w.add_argument("--no-stop", action="store_true", help="leave out the stop-loss")
     s = sub.add_parser("signals"); s.add_argument("--strategy", choices=list(STRATEGIES))
+    r = sub.add_parser("research", help="LLM reads recent news and writes a stance with reasons")
+    r.add_argument("symbols", nargs="*")
+    r.add_argument("--refresh", action="store_true", help="ask the model again even if nothing changed")
+    r.add_argument("--show-prompt", action="store_true",
+                   help="print what would be sent to the model, and send nothing")
+    sub.add_parser("research-score", help="compare past research notes with what prices did next")
     pp = sub.add_parser("paper"); pp.add_argument("--execute", action="store_true")
     lt = sub.add_parser("log-trade", help="record a manual (e.g. Fidelity) trade")
     lt.add_argument("side", choices=["buy", "sell"])
@@ -422,7 +501,8 @@ def build_parser():
 COMMANDS = {
     "init": cmd_init, "fetch": cmd_fetch, "quote": cmd_quote, "backtest": cmd_backtest,
     "backtest-all": cmd_backtest_all, "walk-forward": cmd_walk_forward,
-    "signals": cmd_signals, "paper": cmd_paper,
+    "signals": cmd_signals, "research": cmd_research, "research-score": cmd_research_score,
+    "paper": cmd_paper,
     "log-trade": cmd_log_trade, "report": cmd_report,
 }
 

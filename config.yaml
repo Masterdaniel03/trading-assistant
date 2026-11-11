@@ -34,6 +34,13 @@ walk_forward:
     momentum: {lookback: [126, 252], skip: [0, 21]}
     vol_target: {target_vol: [0.10, 0.15, 0.20], window: [20, 60]}
 
+# LLM research layer: reads recent news and writes a stance with reasons.
+# Advisory only: notes are logged and scored, the bot does not trade on them.
+research:
+  model: gemini-3.8-flash      # needs GEMINI_API_KEY in .env
+  news_lookback_days: 3        # covers a weekend
+  max_news_items: 12           # per symbol, most focused and newest first
+
 # Hard limits enforced by the paper/live bot before any order is sent.
 risk:
   max_position_pct: 0.20       # no single symbol above 20% of equity

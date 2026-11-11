@@ -14,6 +14,8 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
           rebalance.py + risk.py ──► broker.py ──► Alpaca (paper)
                                                     
   manual Fidelity trades ──► `log-trade` ──► trades table (followed_ai flag)
+
+  Alpaca news ──► news.py ──► research.py ──► Gemini ──► answer checked ──► signals (llm_news)
 ```
 
 **Two tracks**
@@ -25,7 +27,7 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
 ```bash
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # add your Alpaca PAPER keys
+cp .env.example .env        # add your Alpaca PAPER keys, and a Gemini key for `research`
 python main.py init
 python main.py fetch
 ```
@@ -40,13 +42,28 @@ python main.py fetch
 | `python main.py backtest-all` | Every watchlist symbol × strategy → `reports/backtest_summary.csv` |
 | `python main.py walk-forward [SYMBOLS...] [--strategy NAME] [--verbose]` | Out-of-sample test: picks parameters on each training window, trades them on the next window → `reports/walk_forward_summary.csv` |
 | `python main.py signals` | Today's target positions (also logged to the DB) |
+| `python main.py research [SYMBOLS...] [--refresh] [--show-prompt]` | An LLM reads the last few days of news and writes a stance with reasons (advisory; see below). `--show-prompt` prints what would be sent and sends nothing |
+| `python main.py research-score` | Average return after bullish / neutral / bearish notes, once they are old enough to score |
 | `python main.py paper` | Dry run: shows orders the bot would send |
 | `python main.py paper --execute` | Sends those orders to Alpaca paper. Every run, dry or not, is appended to `logs/paper_trading.log`; the next run records what each earlier order filled at |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
-| `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, DB) |
+| `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, paper runs, research checks, DB) |
 
 Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
+
+## LLM research layer
+`python main.py research` gives the model (Gemini, set in `config.yaml`) two things per symbol: a few price facts computed from the stored closes, and up to 12 recent news items from Alpaca's news feed. It answers with a stance (bullish, neutral or bearish), a confidence, a short summary, its reasoning, risks, and the news items it relied on.
+
+The answer is kept only if it passes these checks:
+- it has the expected shape;
+- every news item it cites was really supplied;
+- a bullish or bearish view cites at least one item;
+- every dollar amount or percentage it quotes appears in the supplied material.
+
+A kept answer is logged as a signal with strategy `llm_news`, with the reasoning in `signals.reason`. A failed answer is stored as rejected with the reason, and logs no signal. With no recent news the model is not called. Every attempt is in the `research` table and every run in `logs/research.log`. The same inputs reuse the stored answer, which saves free-tier quota.
+
+**The bot does not trade on these notes.** An LLM's view can't be backtested honestly, because the model may already know what happened next. The only fair test is forward: log the notes now and compare them with later prices using `research-score`.
 
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
@@ -67,7 +84,8 @@ After the day's prices are final (1:15 pm Pacific, 15 minutes after the close): 
 - [x] Phase 1: data pipeline, SQLite logging, backtester, 2 baseline strategies, Alpaca paper bot, manual trade log
 - [x] Phase 2a: walk-forward / out-of-sample testing; more strategies (momentum, volatility targeting)
 - [ ] Phase 2b: crypto on Alpaca (`BTC/USD`)
-- [ ] Phase 3: LLM research layer (summarize news/earnings → a signal with written reasoning, stored in `signals.reason`)
+- [x] Phase 3a: LLM research layer (recent news → a checked stance with written reasoning, stored in `signals.reason`; forward scoring)
+- [ ] Phase 3b: earnings dates and filings as extra research inputs; decide from the scores whether the notes should influence the bot
 - [ ] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
 - [ ] Phase 5: write-up of results (including what didn't work)
 
