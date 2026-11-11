@@ -37,7 +37,10 @@ walk_forward:
 # LLM research layer: reads recent news and writes a stance with reasons.
 # Advisory only: notes are logged and scored, the bot does not trade on them.
 research:
-  model: gemini-3.8-flash      # needs GEMINI_API_KEY in .env
+  # Tried in order. Each model has its own free quota (about 5 a minute and
+  # 20 a day), so a busy or used-up model falls through to the next.
+  models: [gemini-3.8-flash, gemini-3.7-flash, gemini-3.5-flash, gemini-3.5-flash-lite]
+  requests_per_minute: 5       # per model; calls are spaced to stay under it
   news_lookback_days: 3        # covers a weekend
   max_news_items: 12           # per symbol, most focused and newest first
 

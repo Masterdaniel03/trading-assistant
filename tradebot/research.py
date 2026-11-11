@@ -27,6 +27,7 @@ import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
 from tradebot import db
+from tradebot.llm import LLMError
 from tradebot.news import NewsItem
 from tradebot.retry import is_rate_limit
 
@@ -74,6 +75,7 @@ class Note:
     sources: list[str] = field(default_factory=list)   # the cited headlines
     cached: bool = False
     rate_limited: bool = False
+    stop_batch: bool = False   # the model service failed; later symbols would only burn quota
 
 
 # ---------------------------------------------------------------- what the model sees
@@ -212,10 +214,13 @@ def research_symbol(conn, symbol: str, close: pd.Series, items: list[NewsItem], 
     prompt = build_prompt(symbol, as_of, price_facts(close, periods_per_year), labelled)
     try:
         reply = llm.generate_json(prompt, Verdict)
-    except Exception as exc:  # noqa: BLE001 - recorded, and the batch carries on
+    except Exception as exc:  # noqa: BLE001 - recorded
         note.rate_limited = is_rate_limit(exc)
-        return finish("error", f"{type(exc).__name__}: {exc}"[:500])
+        note.stop_batch = True
+        detail = str(exc) if isinstance(exc, LLMError) else f"{type(exc).__name__}: {exc}"
+        return finish("error", detail[:500])
     tokens = dict(input_tokens=reply.input_tokens, output_tokens=reply.output_tokens)
+    note.model = stored["model"] = reply.model or llm.model
 
     try:
         verdict = Verdict.model_validate_json(reply.text)
@@ -261,8 +266,9 @@ def render(note: Note, width: int = 100) -> str:
     else:
         head = f"failed: {note.detail}"
     reused = ", reused the earlier answer" if note.cached else ""
+    by = f", {note.model}" if note.model and note.status in ("ok", "rejected") else ""
     lines = [f"{note.symbol}  {head}",
-             f"  [prices to {note.as_of}, {note.news_count} news item(s){reused}]"]
+             f"  [prices to {note.as_of}, {note.news_count} news item(s){by}{reused}]"]
     if note.status == "ok":
         parts = [("Summary", note.summary), ("Why", note.reasoning),
                  ("Risks", "; ".join(note.risks)), ("Sources", "; ".join(note.sources))]

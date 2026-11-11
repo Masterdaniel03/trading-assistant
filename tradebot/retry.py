@@ -106,7 +106,7 @@ def call_with_retry(fn: Callable[..., T], *args,
                 raise
             delay = backoff_delay(attempt, exc, policy)
             kind = "rate-limited" if is_rate_limit(exc) else "transient error"
-            log.warning("%s %s (%s: %s); retry %d/%d in %.1fs", label, kind,
+            log.warning("%s %s (%s: %.160s); retry %d/%d in %.1fs", label, kind,
                         type(exc).__name__, exc, attempt, policy.attempts - 1, delay)
             sleep(delay)
     raise AssertionError("unreachable")

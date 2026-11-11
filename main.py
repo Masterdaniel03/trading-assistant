@@ -232,7 +232,7 @@ def cmd_signals(cfg, args):
 def cmd_research(cfg, args):
     """Advisory only: notes are logged and scored, and the bot does not trade on them."""
     from tradebot import research
-    from tradebot.llm import DEFAULT_MODEL, GeminiLLM
+    from tradebot.llm import DEFAULT_MODELS, GeminiLLM
     from tradebot.news import AlpacaNews, select_items
 
     rc = cfg.get("research", {})
@@ -243,8 +243,9 @@ def cmd_research(cfg, args):
     since = datetime.now(timezone.utc) - timedelta(days=rc.get("news_lookback_days", 3))
     try:
         news = AlpacaNews(secrets["alpaca_key"], secrets["alpaca_secret"])
-        llm = None if args.show_prompt else GeminiLLM(secrets["gemini_key"],
-                                                      rc.get("model", DEFAULT_MODEL))
+        models = rc.get("models") or ([rc["model"]] if rc.get("model") else DEFAULT_MODELS)
+        llm = None if args.show_prompt else GeminiLLM(
+            secrets["gemini_key"], models, rc.get("requests_per_minute", 5))
     except RuntimeError as e:
         sys.exit(str(e))
 
@@ -260,7 +261,7 @@ def cmd_research(cfg, args):
             print("-" * 72)
         return
 
-    with RunLog(LOGS / "research.log", f"research ({llm.model})") as say:
+    with RunLog(LOGS / "research.log", f"research ({', '.join(llm.models)})") as say:
         for sym in symbols:
             close = db.load_close(conn, sym)
             if close.empty:
@@ -276,9 +277,9 @@ def cmd_research(cfg, args):
                                             periods_per_year(sym), refresh=args.refresh)
             say(research.render(note))
             say()
-            if note.rate_limited:
-                say("Gemini's rate limit was hit and the retries ran out, so the remaining "
-                    "symbols were skipped. Try again later.")
+            if note.stop_batch:
+                say("No Gemini model could answer, so the remaining symbols were skipped to save "
+                    "quota. Run it again later; answers already kept are reused, not re-asked.")
                 break
         say("Advisory only: these notes are logged and scored. The bot does not trade on them.")
 
