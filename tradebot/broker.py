@@ -34,6 +34,20 @@ class PositionInfo:
     unrealized_plpc: float  # return from average entry, e.g. -0.08
 
 
+@dataclass(frozen=True)
+class OrderInfo:
+    status: str                      # new, accepted, filled, canceled, ...
+    filled_qty: float
+    filled_avg_price: float | None
+
+
+def enum_text(value) -> str | None:
+    """'filled' from OrderStatus.FILLED; plain strings pass through."""
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
 class AlpacaBroker:
     def __init__(self, key: str, secret: str, paper: bool = True):
         if not key or not secret:
@@ -65,6 +79,36 @@ class AlpacaBroker:
 
     def is_market_open(self) -> bool:
         return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)
+
+    def open_order_symbols(self) -> set[str]:
+        """Symbols with an order that is still waiting to fill.
+
+        Orders sent while the market is closed sit here until the open, and the
+        position still reads $0 meanwhile, so planning from positions alone
+        would send the same order again."""
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        orders = call_with_retry(self.client.get_orders,
+                                 GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500),
+                                 what="alpaca open orders")
+        return {o.symbol for o in orders}
+
+    def order_info(self, order_id: str) -> OrderInfo | None:
+        """Current state of one order, or None if Alpaca no longer knows it."""
+        def lookup():
+            try:
+                return self.client.get_order_by_id(order_id)
+            except Exception as exc:  # noqa: BLE001
+                if _status(exc) == 404:
+                    return None
+                raise
+
+        o = call_with_retry(lookup, what="alpaca order status")
+        if o is None:
+            return None
+        price = float(o.filled_avg_price) if o.filled_avg_price else None
+        return OrderInfo(enum_text(o.status) or "unknown", float(o.filled_qty or 0), price)
 
     def _order_by_client_id(self, client_order_id: str):
         try:

@@ -21,7 +21,7 @@ def check_daily_loss(equity: float, last_equity: float, risk: dict) -> None:
     """last_equity = equity at previous close (Alpaca: account.last_equity)."""
     if last_equity and (equity / last_equity - 1) <= -risk["daily_loss_limit_pct"]:
         raise RiskViolation(
-            f"Daily loss limit hit ({equity / last_equity - 1:.2%}); no new orders today."
+            f"Daily loss limit hit ({equity / last_equity - 1:.2%}); no new buys today."
         )
 
 

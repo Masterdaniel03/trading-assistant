@@ -7,3 +7,4 @@ data/*.db
 reports/*.png
 reports/*.csv
 .pytest_cache/
+logs/

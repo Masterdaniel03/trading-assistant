@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS trades (
     strategy   TEXT,
     followed_ai INTEGER,           -- manual trades: 1 = followed AI signal, 0 = own call
     order_id   TEXT,
-    notes      TEXT
+    notes      TEXT,
+    status     TEXT                -- broker orders: accepted, filled, canceled, ...
 );
 
 CREATE TABLE IF NOT EXISTS stop_events (
@@ -75,6 +76,10 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Databases made before a column existed get it added here.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+    if "status" not in columns:
+        conn.execute("ALTER TABLE trades ADD COLUMN status TEXT")
     conn.commit()
 
 
@@ -123,16 +128,40 @@ def log_signal(conn, symbol, strategy, target, reason=None) -> bool:
 
 def log_trade(conn, account, symbol, side, qty=None, notional=None, price=None,
               fees=0.0, strategy=None, followed_ai=None, order_id=None, notes=None,
-              ts=None) -> int:
+              ts=None, status=None) -> int:
     cur = conn.execute(
         """INSERT INTO trades (ts, account, symbol, side, qty, notional, price, fees,
-                               strategy, followed_ai, order_id, notes)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               strategy, followed_ai, order_id, notes, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ts or now_utc(), account, symbol.upper(), side, qty, notional, price, fees,
-         strategy, followed_ai, order_id, notes),
+         strategy, followed_ai, order_id, notes, status),
     )
     conn.commit()
     return cur.lastrowid
+
+
+SETTLED = ("filled", "canceled", "expired", "rejected", "replaced")
+
+
+def open_trades(conn, account) -> list[tuple]:
+    """Broker orders whose outcome isn't recorded yet: (id, ts, symbol, side, order_id)."""
+    marks = ",".join("?" * len(SETTLED))
+    return conn.execute(
+        f"""SELECT id, ts, symbol, side, order_id FROM trades
+            WHERE account = ? AND order_id IS NOT NULL AND order_id != ''
+              AND (status IS NULL OR status NOT IN ({marks}))
+            ORDER BY id""", (account, *SETTLED)).fetchall()
+
+
+def update_trade(conn, trade_id, status, filled_qty=None, filled_price=None) -> None:
+    """Record an order's outcome. A fill replaces the planned dollar amount
+    with what was actually traded."""
+    if filled_qty and filled_price:
+        conn.execute("UPDATE trades SET status = ?, qty = ?, price = ?, notional = ? WHERE id = ?",
+                     (status, filled_qty, filled_price, filled_qty * filled_price, trade_id))
+    else:
+        conn.execute("UPDATE trades SET status = ? WHERE id = ?", (status, trade_id))
+    conn.commit()
 
 
 def log_stop(conn, symbol, date, pl_pct) -> None:

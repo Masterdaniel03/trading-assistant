@@ -28,12 +28,14 @@ from tradebot.config import ROOT, load_config, load_secrets
 from tradebot.data import (AlpacaQuotes, drop_incomplete_bars, fetch_many, fetch_prices,
                            history_was_readjusted, incremental_start, periods_per_year)
 from tradebot.rebalance import plan_orders
+from tradebot.runlog import RunLog
 from tradebot.risk import (RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed,
                            stop_loss_pct, triggered_stops)
 from tradebot.strategies import STRATEGIES, get_strategy
 from tradebot.walkforward import walk_forward
 
 REPORTS = ROOT / "reports"
+LOGS = ROOT / "logs"
 
 
 def cmd_init(cfg, args):
@@ -233,74 +235,131 @@ def _in_cooldown(conn, symbol, risk) -> bool:
     return bars_since < risk["stop_cooldown_bars"]
 
 
+def _record_earlier_orders(conn, broker, say) -> None:
+    """Look up orders sent on earlier runs and record how they ended."""
+    waiting = db.open_trades(conn, broker.account_name)
+    if not waiting:
+        return
+    say("Earlier orders:")
+    for trade_id, ts, symbol, side, order_id in waiting:
+        info = broker.order_info(order_id)
+        if info is None:
+            say(f"  {side:<5} {symbol:<6} sent {ts[:10]}: the broker has no record of it")
+            continue
+        db.update_trade(conn, trade_id, info.status, info.filled_qty, info.filled_avg_price)
+        if info.filled_qty and info.filled_avg_price:
+            say(f"  {side:<5} {symbol:<6} sent {ts[:10]}: {info.status}: "
+                f"{info.filled_qty:g} @ ${info.filled_avg_price:,.2f}")
+        else:
+            say(f"  {side:<5} {symbol:<6} sent {ts[:10]}: {info.status}")
+
+
 def cmd_paper(cfg, args):
-    from tradebot.broker import AlpacaBroker
+    from tradebot.broker import AlpacaBroker, enum_text
 
     secrets = load_secrets()
-    risk = cfg["risk"]
-    check_live_allowed(secrets["alpaca_paper"], risk)
-    pb = cfg["paper_bot"]
-
+    risk, pb = cfg["risk"], cfg["paper_bot"]
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
-    try:
-        broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
-    except RuntimeError as e:
-        sys.exit(str(e))
-    acct = broker.account()
-    db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
-    print(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
 
-    # These guards block new buys but must not block stop-loss exits.
-    halted = None
-    try:
-        check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
-                         date.today(), risk)
-        check_daily_loss(acct["equity"], acct["last_equity"], risk)
-    except RiskViolation as e:
-        halted = str(e)
+    title = "paper --execute" if args.execute else "paper (dry run)"
+    with RunLog(LOGS / "paper_trading.log", title) as say:
+        try:
+            check_live_allowed(secrets["alpaca_paper"], risk)
+            broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"],
+                                  paper=secrets["alpaca_paper"])
+        except (RiskViolation, RuntimeError) as e:
+            sys.exit(str(e))
+        acct = broker.account()
+        db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
+        say(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
+        _record_earlier_orders(conn, broker, say)
 
-    held = broker.position_details()
-    stops = triggered_stops({s: p.unrealized_plpc for s, p in held.items()}, risk)
-    for sym, pl in stops.items():
-        print(f"  STOP  {sym:<6} {pl:+.1%} (limit {-stop_loss_pct(risk):+.1%})")
+        # Two guards, two strengths. Old prices make every signal untrustworthy,
+        # so only stop-loss exits pass. A big down day blocks adding risk, but
+        # sells that reduce it still go through.
+        stale = daily_loss = None
+        try:
+            check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
+                             date.today(), risk)
+        except RiskViolation as e:
+            stale = str(e)
+        try:
+            check_daily_loss(acct["equity"], acct["last_equity"], risk)
+        except RiskViolation as e:
+            daily_loss = str(e)
 
-    targets = _current_targets(cfg, conn, pb["strategy"], pb["symbols"])
-    for sym in targets:
-        if sym in stops or _in_cooldown(conn, sym, risk):
-            targets[sym] = 0.0
-    orders = plan_orders(targets, {s: p.market_value for s, p in held.items()}, acct["equity"], risk,
-                         close_unlisted=pb.get("close_unlisted", True))
-    if halted:
-        print(f"Blocked: {halted}")
-        orders = [o for o in orders if o.symbol in stops and o.side == "close"]
+        held = broker.position_details()
+        stops = triggered_stops({s: p.unrealized_plpc for s, p in held.items()}, risk)
+        for sym, pl in stops.items():
+            say(f"  STOP  {sym:<6} {pl:+.1%} (limit {-stop_loss_pct(risk):+.1%})")
+
+        targets = _current_targets(cfg, conn, pb["strategy"], pb["symbols"])
+        cooling = [s for s in targets if s not in stops and _in_cooldown(conn, s, risk)]
+        for sym in targets:
+            if sym in stops or sym in cooling:
+                targets[sym] = 0.0
+        say(f"Targets ({pb['strategy']}): " + ", ".join(f"{s} {t:.2f}" for s, t in targets.items()))
+        if cooling:
+            say(f"Held at 0 during the stop-loss cooldown: {', '.join(cooling)}")
+
+        orders = plan_orders(targets, {s: p.market_value for s, p in held.items()},
+                             acct["equity"], risk, close_unlisted=pb.get("close_unlisted", True))
+        if stale:
+            say(f"Blocked: {stale}")
+            say("Only stop-loss exits are allowed.")
+            orders = [o for o in orders if o.symbol in stops and o.side == "close"]
+        elif daily_loss:
+            say(f"Blocked: {daily_loss}")
+            say("Sells and stop-loss exits still go through.")
+            orders = [o for o in orders if o.side != "buy"]
+
+        # An order from an earlier run that hasn't filled yet (e.g. sent after
+        # the close) is not in the positions, so the plan would repeat it.
+        pending = broker.open_order_symbols()
+        for o in orders:
+            if o.symbol in pending:
+                say(f"  skip  {o.symbol:<6} an earlier order is still open, so no new {o.side} order")
+        orders = [o for o in orders if o.symbol not in pending]
+        orders.sort(key=lambda o: o.side == "buy")   # sells first, so buys never lean on margin
+
         if not orders:
-            sys.exit("No stop-loss exits to send, so no orders.")
-        print("Sending stop-loss exits only.")
-    if not orders:
-        print("Portfolio already on target. No orders.")
-        return
-    for o in orders:
-        print(f"  {o.side:<5} {o.symbol:<6} ${o.notional:>9,.2f}   (have ${o.current_value:,.0f} -> want ${o.target_value:,.0f})")
-    if not args.execute:
-        print("\nDry run. Re-run with --execute to send these orders.")
-        return
-    if not broker.is_market_open():
-        print("Market closed: orders will queue for the next open (time_in_force=DAY).")
-    for o in orders:
-        if o.side == "close":
-            resp = broker.close_position(o.symbol)
-            side = "sell"
-        else:
-            resp = broker.submit_notional(o.symbol, o.side, o.notional)
-            side = o.side
-        db.log_trade(conn, broker.account_name, o.symbol, side, notional=o.notional,
-                     strategy=pb["strategy"], order_id=str(getattr(resp, "id", "")),
-                     notes="stop-loss" if o.symbol in stops else None)
-        if o.symbol in stops:
-            db.log_stop(conn, o.symbol, db.last_price_date(conn, o.symbol) or date.today().isoformat(),
-                        stops[o.symbol])
-        print(f"  sent {side} {o.symbol}")
+            say("No orders to send." if (stale or daily_loss or pending)
+                else "Portfolio already on target. No orders.")
+            return
+        say("Planned orders:")
+        for o in orders:
+            say(f"  {o.side:<5} {o.symbol:<6} ${o.notional:>10,.2f}   "
+                f"(have ${o.current_value:,.0f} -> want ${o.target_value:,.0f})")
+        if not args.execute:
+            say("Dry run: nothing was sent. Use --execute to send these orders.")
+            return
+        if not broker.is_market_open():
+            say("Market closed: orders will wait for the next open.")
+
+        failed = []
+        for o in orders:
+            side = "sell" if o.side == "close" else o.side
+            try:
+                resp = (broker.close_position(o.symbol) if o.side == "close"
+                        else broker.submit_notional(o.symbol, o.side, o.notional))
+            except Exception as e:  # noqa: BLE001 - one bad order must not strand the others
+                failed.append(o.symbol)
+                say(f"  FAILED {side} {o.symbol}: {type(e).__name__}: {e}")
+                continue
+            order_id = str(getattr(resp, "id", ""))
+            db.log_trade(conn, broker.account_name, o.symbol, side, notional=o.notional,
+                         strategy=pb["strategy"], order_id=order_id,
+                         notes="stop-loss" if o.symbol in stops else None,
+                         status=enum_text(getattr(resp, "status", None)))
+            if o.symbol in stops:
+                db.log_stop(conn, o.symbol,
+                            db.last_price_date(conn, o.symbol) or date.today().isoformat(),
+                            stops[o.symbol])
+            say(f"  sent {side} {o.symbol} ${o.notional:,.2f}  (order {order_id})")
+        say(f"Result: {len(orders) - len(failed)} of {len(orders)} orders sent.")
+        if failed:
+            sys.exit(f"{len(failed)} order(s) failed: {', '.join(failed)}")
 
 
 def cmd_log_trade(cfg, args):
@@ -368,6 +427,9 @@ COMMANDS = {
 }
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        # News text can hold characters a Windows console can't print; show "?" rather than crash.
+        stream.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args()
     COMMANDS[args.cmd](load_config(), args)

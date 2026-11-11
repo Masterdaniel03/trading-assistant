@@ -41,7 +41,7 @@ python main.py fetch
 | `python main.py walk-forward [SYMBOLS...] [--strategy NAME] [--verbose]` | Out-of-sample test: picks parameters on each training window, trades them on the next window → `reports/walk_forward_summary.csv` |
 | `python main.py signals` | Today's target positions (also logged to the DB) |
 | `python main.py paper` | Dry run: shows orders the bot would send |
-| `python main.py paper --execute` | Sends those orders to Alpaca paper |
+| `python main.py paper --execute` | Sends those orders to Alpaca paper. Every run, dry or not, is appended to `logs/paper_trading.log`; the next run records what each earlier order filled at |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
 | `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, DB) |
@@ -50,16 +50,18 @@ Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
 
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
-- Max 20% of equity in any one symbol, no margin, and no new buys after a 3% daily loss.
+- Max 20% of equity in any one symbol, no margin, and no new buys after a 3% daily loss (sells that reduce risk still go through).
+- Running `paper --execute` twice is safe: a symbol with an order still waiting to fill gets no second order. Sells are sent before buys.
 - Each position risks at most 1.5% of equity: a 7.5% stop-loss (1.5% / 20%), checked each time `paper` runs, followed by a 20-bar cooldown. It is not a resting order, so a price gap or a long gap between runs can lose more. Stops still execute when the daily-loss or stale-data guards block buying.
 - `backtest` and `walk-forward` include the stop; pass `--no-stop` to compare without it.
-- `paper` refuses to run if any bot symbol's prices are missing or older than `risk.max_data_age_days` (default 4).
+- If any bot symbol's prices are missing or older than `risk.max_data_age_days` (default 4), `paper` sends stop-loss exits only.
+- `fetch` stores finished daily bars only: today's stock bar is left out until 16:15 New York time, and today's crypto bar until the UTC day ends.
 - Positions in the paper account that aren't in `paper_bot.symbols` are closed (`paper_bot.close_unlisted`).
 - `paper` is a dry run unless you pass `--execute`.
 - Never commit `.env`. Never give any key withdrawal permissions.
 
 ## Daily routine (once it runs)
-After the market closes (1 pm Pacific): `fetch` → `signals` → `paper --execute`. Log any Fidelity trades the same day. A cron job or GitHub Actions schedule can automate the first three.
+After the day's prices are final (1:15 pm Pacific, 15 minutes after the close): `fetch` → `signals` → `paper --execute`. Orders sent then fill at the next open. Log any Fidelity trades the same day. A cron job or GitHub Actions schedule can automate the first three.
 
 ## Roadmap
 - [x] Phase 1: data pipeline, SQLite logging, backtester, 2 baseline strategies, Alpaca paper bot, manual trade log
