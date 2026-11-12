@@ -62,7 +62,6 @@ risk:
   stop_cooldown_bars: 20       # after a stop, stay out of that symbol this many bars
   daily_loss_limit_pct: 0.03   # no new buys for the day after a 3% drawdown
   min_order_notional: 1.0      # Alpaca fractional minimum is $1
-  max_data_age_days: 4         # refuse to trade if any bot symbol's last close is older
   allow_live: false            # flip ONLY after months of paper results
 
 paper_bot:

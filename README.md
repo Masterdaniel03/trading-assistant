@@ -85,7 +85,7 @@ The report includes the point-in-time audit, rank IC, a long-short return before
 - Running `paper --execute` twice is safe: a symbol with an order still waiting to fill gets no second order. Sells are sent before buys.
 - Each position risks at most 1.5% of equity: a 7.5% stop-loss (1.5% / 20%), checked each time `paper` runs, followed by a 20-bar cooldown. It is not a resting order, so a price gap or a long gap between runs can lose more. Stops still execute when the daily-loss or stale-data guards block buying.
 - `backtest` and `walk-forward` include the stop; pass `--no-stop` to compare without it.
-- If any bot symbol's prices are missing or older than `risk.max_data_age_days` (default 4), `paper` sends stop-loss exits only.
+- If any bot symbol is missing the close of the latest finished session, `paper` sends stop-loss exits only. Which session that is comes from Alpaca's exchange calendar, so holidays and your PC's timezone don't matter.
 - `fetch` stores finished daily bars only: today's stock bar is left out until 16:15 New York time, and today's crypto bar until the UTC day ends.
 - Positions in the paper account that aren't in `paper_bot.symbols` are closed (`paper_bot.close_unlisted`).
 - `paper` is a dry run unless you pass `--execute`.

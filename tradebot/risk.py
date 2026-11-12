@@ -1,9 +1,6 @@
 """Risk limits applied before any order reaches a broker."""
 from __future__ import annotations
 
-from datetime import date
-
-DEFAULT_MAX_DATA_AGE_DAYS = 4  # Fri close -> Tue morning after a Monday holiday
 
 
 class RiskViolation(Exception):
@@ -36,22 +33,26 @@ def triggered_stops(returns: dict[str, float], risk: dict) -> dict[str, float]:
     return {sym: r for sym, r in returns.items() if r <= limit}
 
 
-def check_data_fresh(last_dates: dict[str, str | None], today: date, risk: dict) -> None:
-    """Refuse to trade on missing or stale prices.
+def check_data_fresh(last_dates: dict[str, str | None], expected: str | None) -> None:
+    """Refuse to trade unless every symbol has the latest finished session's close.
 
     last_dates: symbol -> latest stored price date (YYYY-MM-DD) or None.
-    Without this, a failed `fetch` would silently trade on old signals, and a
-    symbol with no data at all would be treated as 'target 0' and sold.
+    expected:   the exchange's most recent session whose daily bar is final,
+                taken from the broker's calendar (so weekends, holidays and the
+                machine's own timezone play no part).
+
+    Without this, a failed or lagging `fetch` would silently trade on an older
+    signal, and a symbol with no data at all would be treated as 'target 0'
+    and sold.
     """
-    max_age = risk.get("max_data_age_days", DEFAULT_MAX_DATA_AGE_DAYS)
+    if expected is None:
+        raise RiskViolation("Could not tell which session's prices should be available.")
     problems = []
     for sym, d in last_dates.items():
         if d is None:
             problems.append(f"{sym} (no data)")
-            continue
-        age = (today - date.fromisoformat(d)).days
-        if age > max_age:
-            problems.append(f"{sym} (last close {d}, {age} days old)")
+        elif d < expected:
+            problems.append(f"{sym} (has {d}, needs {expected})")
     if problems:
         raise RiskViolation(
             f"Stale or missing prices: {', '.join(problems)}. Run `python main.py fetch` first."

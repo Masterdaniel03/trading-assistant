@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -426,9 +426,9 @@ def cmd_paper(cfg, args):
         # so only stop-loss exits pass. A big down day blocks adding risk, but
         # sells that reduce it still go through.
         stale = daily_loss = None
+        expected = broker.last_completed_session()    # by the exchange's calendar, not this PC's
         try:
-            check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]},
-                             date.today(), risk)
+            check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]}, expected)
         except RiskViolation as e:
             stale = str(e)
         try:
@@ -501,7 +501,7 @@ def cmd_paper(cfg, args):
                          status=enum_text(getattr(resp, "status", None)))
             if o.symbol in stops:
                 db.log_stop(conn, o.symbol,
-                            db.last_price_date(conn, o.symbol) or date.today().isoformat(),
+                            db.last_price_date(conn, o.symbol) or expected,
                             stops[o.symbol])
             say(f"  sent {side} {o.symbol} ${o.notional:,.2f}  (order {order_id})")
         say(f"Result: {len(orders) - len(failed)} of {len(orders)} orders sent.")

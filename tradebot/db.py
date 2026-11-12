@@ -6,7 +6,7 @@ reproducible and can be analyzed later (and shown on a resume/dashboard).
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -96,8 +96,8 @@ CREATE TABLE IF NOT EXISTS research (
 """
 
 
-def now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def now_utc(timespec: str = "seconds") -> str:
+    return datetime.now(timezone.utc).isoformat(timespec=timespec)
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -217,11 +217,14 @@ def last_stop_date(conn, symbol) -> str | None:
     return row[0] if row else None
 
 
-def log_equity(conn, account, equity, cash=None) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO equity_snapshots VALUES (?,?,?,?)",
-        (now_utc(), account, float(equity), cash),
-    )
+def log_equity(conn, account, equity, cash=None, ts=None) -> None:
+    """Add one snapshot. The time is kept to the microsecond and bumped if it
+    is already taken, so two snapshots can never overwrite each other."""
+    ts = ts or now_utc("microseconds")
+    while conn.execute("SELECT 1 FROM equity_snapshots WHERE ts = ? AND account = ?",
+                       (ts, account)).fetchone():
+        ts = (datetime.fromisoformat(ts) + timedelta(microseconds=1)).isoformat(timespec="microseconds")
+    conn.execute("INSERT INTO equity_snapshots VALUES (?,?,?,?)", (ts, account, float(equity), cash))
     conn.commit()
 
 

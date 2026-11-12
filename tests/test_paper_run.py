@@ -111,6 +111,31 @@ def test_next_run_records_what_happened_to_earlier_orders(bot):
     assert db.open_trades(bot.conn, "alpaca_paper") == []     # settled: not asked about again
 
 
+def test_stale_check_uses_the_exchange_session_not_the_calendar_gap(bot):
+    """Prices one session behind are stale, even though they are only a day old."""
+    from datetime import date, timedelta
+    bot.store("AAA", days_old=1), bot.store("BBB", days_old=1)
+    assert bot.run().sequence == []                      # blocked: today's session is missing
+    assert "needs " + date.today().isoformat() in bot.log_text()
+
+    bot.broker.expected_session = (date.today() - timedelta(days=1)).isoformat()   # e.g. a holiday today
+    assert bot.run().bought == ["AAA", "BBB"]
+
+
+def test_equity_snapshots_never_overwrite_each_other(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db"))
+    db.init_db(conn)
+    same_moment = "2026-11-11T22:00:00.000000+00:00"
+    for equity in (100.0, 101.0, 102.0):
+        db.log_equity(conn, "alpaca_paper", equity, ts=same_moment)
+    db.log_equity(conn, "other_account", 5.0, ts=same_moment)
+    rows = conn.execute("SELECT ts, equity FROM equity_snapshots WHERE account='alpaca_paper' ORDER BY ts").fetchall()
+    assert [r[1] for r in rows] == [100.0, 101.0, 102.0]            # all kept, in order
+    assert len({r[0] for r in rows}) == 3
+    db.log_equity(conn, "alpaca_paper", 103.0)                       # the normal call still works
+    assert conn.execute("SELECT COUNT(*) FROM equity_snapshots").fetchone()[0] == 5
+
+
 def test_old_database_gains_the_status_column(tmp_path):
     path = str(tmp_path / "old.db")
     old = sqlite3.connect(path)

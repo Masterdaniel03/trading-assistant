@@ -110,6 +110,17 @@ def first_incomplete_date(symbol: str, now: pd.Timestamp | None = None) -> str:
     return day.strftime("%Y-%m-%d")
 
 
+def last_completed_session(session_dates: list[str], now: pd.Timestamp | None = None) -> str | None:
+    """The latest stock-exchange session (YYYY-MM-DD) whose daily bar is final by `now`.
+
+    `session_dates` are the exchange's trading days. "Final" follows the same
+    rule `fetch` uses to decide which bars to store, so the two always agree.
+    """
+    cutoff = first_incomplete_date("a-stock", now)
+    done = [d for d in session_dates if d < cutoff]
+    return max(done) if done else None
+
+
 def drop_incomplete_bars(df: pd.DataFrame, symbol: str,
                          now: pd.Timestamp | None = None) -> pd.DataFrame:
     """Keep only bars that are final."""

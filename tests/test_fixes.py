@@ -1,5 +1,4 @@
 import sys
-from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +13,7 @@ from tradebot.rebalance import plan_orders
 from tradebot.risk import RiskViolation, check_data_fresh
 
 RISK = {"max_position_pct": 0.2, "max_total_exposure_pct": 1.0,
-        "daily_loss_limit_pct": 0.03, "min_order_notional": 1.0, "max_data_age_days": 4}
+        "daily_loss_limit_pct": 0.03, "min_order_notional": 1.0}
 
 
 # ---------------------------------------------------------------- incremental fetch
@@ -57,14 +56,33 @@ def test_empty_fresh_is_not_readjusted():
 # ---------------------------------------------------------------- stale data guard
 
 def test_fresh_data_passes():
-    check_data_fresh({"SPY": "2026-11-06"}, date(2026, 11, 9), RISK)  # Fri -> Mon
+    check_data_fresh({"SPY": "2026-11-06"}, "2026-11-06")
+    check_data_fresh({"SPY": "2026-11-09"}, "2026-11-06")      # newer than needed is fine
 
 
 def test_stale_or_missing_data_blocks_trading():
     with pytest.raises(RiskViolation, match="QQQ \\(no data\\)"):
-        check_data_fresh({"SPY": "2026-11-06", "QQQ": None}, date(2026, 11, 9), RISK)
-    with pytest.raises(RiskViolation, match="SPY"):
-        check_data_fresh({"SPY": "2026-10-30"}, date(2026, 11, 9), RISK)
+        check_data_fresh({"SPY": "2026-11-06", "QQQ": None}, "2026-11-06")
+    # one session behind is already stale: this is the "fetch lagged by a day" case
+    with pytest.raises(RiskViolation, match="SPY \\(has 2026-11-05, needs 2026-11-06\\)"):
+        check_data_fresh({"SPY": "2026-11-05"}, "2026-11-06")
+    with pytest.raises(RiskViolation, match="Could not tell"):
+        check_data_fresh({"SPY": "2026-11-06"}, None)
+
+
+def test_last_completed_session_follows_new_york_not_the_local_clock():
+    from tradebot.data import last_completed_session
+    sessions = ["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11"]   # Fri, Mon, Tue, Wed
+    utc = lambda t: pd.Timestamp(t, tz="UTC")
+    # Wed 15:00 New York: Wednesday's bar is not final yet
+    assert last_completed_session(sessions, utc("2026-11-11 20:00")) == "2026-11-10"
+    # Wed 16:20 New York: now it is
+    assert last_completed_session(sessions, utc("2026-11-11 21:20")) == "2026-11-11"
+    # Thu 00:30 UTC is still Wed evening in New York (and Wed afternoon in California)
+    assert last_completed_session(sessions, utc("2026-11-12 00:30")) == "2026-11-11"
+    # Sunday: Friday's session, whatever the calendar day is
+    assert last_completed_session(sessions[:1], utc("2026-11-08 18:00")) == "2026-11-06"
+    assert last_completed_session([], utc("2026-11-08 18:00")) is None
 
 
 # ---------------------------------------------------------------- unlisted positions

@@ -11,7 +11,7 @@ from tradebot import db
 
 RISK = {"max_position_pct": 0.20, "max_total_exposure_pct": 1.0, "max_risk_per_position_pct": 0.015,
         "stop_cooldown_bars": 2, "daily_loss_limit_pct": 0.03, "min_order_notional": 1.0,
-        "max_data_age_days": 4, "allow_live": False}
+        "allow_live": False}
 
 
 @pytest.fixture
@@ -28,6 +28,7 @@ class FakeBroker:
     order_updates: dict = {}      # order_id -> what the broker now says about it
     fail_on: set = set()          # symbols whose orders the broker rejects
     market_open = True
+    expected_session = None       # None = today; the session whose prices should be stored
     last = None
 
     def __init__(self, *args, **kwargs):
@@ -42,6 +43,9 @@ class FakeBroker:
 
     def open_order_symbols(self):
         return set(FakeBroker.open_symbols)
+
+    def last_completed_session(self):
+        return FakeBroker.expected_session or date.today().isoformat()
 
     def order_info(self, order_id):
         return FakeBroker.order_updates.get(order_id)
@@ -79,6 +83,7 @@ def bot(tmp_path, monkeypatch):
     FakeBroker.held, FakeBroker.open_symbols = {}, set()
     FakeBroker.order_updates, FakeBroker.fail_on = {}, set()
     FakeBroker.market_open = True
+    FakeBroker.expected_session = None
 
     def store(symbol, days_old=0, n=5):
         last = date.today() - timedelta(days=days_old)

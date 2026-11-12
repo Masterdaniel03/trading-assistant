@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from tradebot.retry import call_with_retry, is_rate_limit, is_transient
 
@@ -79,6 +81,20 @@ class AlpacaBroker:
 
     def is_market_open(self) -> bool:
         return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)
+
+    def last_completed_session(self) -> str | None:
+        """The exchange's latest session whose daily prices should be available
+        by now, from Alpaca's trading calendar (it knows holidays)."""
+        from alpaca.trading.requests import GetCalendarRequest
+
+        from tradebot.data import last_completed_session
+
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        calendar = call_with_retry(
+            self.client.get_calendar,
+            GetCalendarRequest(start=today - timedelta(days=14), end=today),
+            what="alpaca calendar")
+        return last_completed_session([c.date.isoformat() for c in calendar])
 
     def open_order_symbols(self) -> set[str]:
         """Symbols with an order that is still waiting to fill.
