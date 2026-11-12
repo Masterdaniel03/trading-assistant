@@ -50,8 +50,44 @@ def fetch_prices(symbol: str, start: str, end: str | None = None) -> pd.DataFram
     out = hist.rename(columns=str.lower)[PRICE_COLUMNS[2:]]
     out.insert(0, "date", dates)
     out.insert(0, "symbol", symbol)
-    # A missing close would turn into "no signal" and make the bot sell.
+    # A missing close would turn into "no signal" and make the bot sell. Yahoo
+    # does send such rows (seen live: the latest day, blank, late in the evening).
+    kept = out.dropna(subset=["close"]).reset_index(drop=True)
+    kept.attrs["missing_close"] = len(out) - len(kept)   # so the caller can say so
+    return kept
+
+
+def bars_to_prices(symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
+    """Alpaca daily bars (a `timestamp` column in UTC) -> our long price format."""
+    if bars.empty:
+        return pd.DataFrame(columns=PRICE_COLUMNS)
+    dates = pd.to_datetime(bars["timestamp"], utc=True).dt.tz_convert("America/New_York")
+    out = bars[PRICE_COLUMNS[2:]].astype(float).reset_index(drop=True)
+    out.insert(0, "date", dates.dt.strftime("%Y-%m-%d").to_numpy())
+    out.insert(0, "symbol", symbol)
     return out.dropna(subset=["close"]).reset_index(drop=True)
+
+
+def fetch_prices_alpaca(symbol: str, start: str, key: str, secret: str) -> pd.DataFrame:
+    """Daily split/dividend-adjusted bars from Alpaca instead of Yahoo.
+
+    Needed for stocks Yahoo no longer serves, such as ones that were delisted.
+    Leaving those out of a test would quietly drop the losers.
+    """
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    client = StockHistoricalDataClient(key, secret)
+    disable_builtin_retry(client)
+    now = pd.Timestamp.now(tz="UTC")
+    req = StockBarsRequest(symbol_or_symbols=symbol.upper(), timeframe=TimeFrame.Day,
+                           start=pd.Timestamp(start, tz="UTC").to_pydatetime(),
+                           end=(now - pd.Timedelta(minutes=20)).to_pydatetime(),  # free plan: 15 min delay
+                           adjustment=Adjustment.ALL, feed=DataFeed.SIP)
+    bars = call_with_retry(client.get_stock_bars, req, what=f"alpaca bars {symbol}").df
+    return bars_to_prices(symbol, bars.reset_index() if not bars.empty else bars)
 
 
 # Yahoo serves today's bar while it is still forming. Storing it would mean

@@ -9,6 +9,8 @@
     python main.py signals                   # today's signals (what the AI suggests)
     python main.py research [SYMBOLS...]     # LLM reads recent news, writes a stance with reasons
     python main.py research-score            # how past research notes compare with later prices
+    python main.py news-archive              # download historical news for the news test
+    python main.py news-test                 # does past news predict the next session? (walk-forward)
     python main.py paper                     # dry run: show orders the bot WOULD place
     python main.py paper --execute           # actually send them to Alpaca paper
     python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "SMA signal"
@@ -28,7 +30,8 @@ from tradebot import db
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest, with_stop_loss
 from tradebot.config import ROOT, load_config, load_secrets
 from tradebot.data import (AlpacaQuotes, drop_incomplete_bars, fetch_many, fetch_prices,
-                           history_was_readjusted, incremental_start, periods_per_year)
+                           fetch_prices_alpaca, history_was_readjusted, incremental_start,
+                           periods_per_year)
 from tradebot.rebalance import plan_orders
 from tradebot.runlog import RunLog
 from tradebot.risk import (RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed,
@@ -51,6 +54,9 @@ def cmd_fetch(cfg, args):
     db.init_db(conn)
     symbols = args.symbols or cfg["watchlist"]
     full_start = cfg["start_date"]
+    if args.source == "alpaca":
+        _fetch_from_alpaca(conn, symbols, full_start)
+        return
     starts = ({s: full_start for s in symbols} if args.full else
               {s: incremental_start(db.last_price_date(conn, s), full_start) for s in symbols})
     failed = []
@@ -66,10 +72,33 @@ def cmd_fetch(cfg, args):
             failed.append(sym)
             print(f"{sym:<8} FAILED  {type(result).__name__}: {result}")
             continue
+        blank = result.attrs.get("missing_close", 0)
         final = drop_incomplete_bars(result, sym)
         n = db.upsert_prices(conn, final) if not final.empty else 0
         note = "; today's bar is not final yet, so it was left out" if len(final) < len(result) else ""
+        if blank:
+            note += f"; Yahoo sent {blank} row(s) with no close, left out. Fetch again later"
         print(f"{sym:<8} {n:>5} rows  (latest: {db.last_price_date(conn, sym)}{note})")
+    if failed:
+        sys.exit(f"Fetch failed for {', '.join(failed)} (see errors above).")
+
+
+def _fetch_from_alpaca(conn, symbols, start):
+    """Full history from Alpaca, for stocks Yahoo no longer has (e.g. delisted ones)."""
+    secrets = load_secrets()
+    if not secrets["alpaca_key"] or not secrets["alpaca_secret"]:
+        sys.exit("--source alpaca needs ALPACA_API_KEY / ALPACA_SECRET_KEY in .env")
+    failed = []
+    for sym in symbols:
+        try:
+            bars = fetch_prices_alpaca(sym, start, secrets["alpaca_key"], secrets["alpaca_secret"])
+        except Exception as exc:  # noqa: BLE001 - reported, and the rest carry on
+            failed.append(sym)
+            print(f"{sym:<8} FAILED  {type(exc).__name__}: {exc}")
+            continue
+        final = drop_incomplete_bars(bars, sym)
+        n = db.upsert_prices(conn, final) if not final.empty else 0
+        print(f"{sym:<8} {n:>5} rows  (latest: {db.last_price_date(conn, sym)}, from Alpaca)")
     if failed:
         sys.exit(f"Fetch failed for {', '.join(failed)} (see errors above).")
 
@@ -301,6 +330,50 @@ def cmd_research_score(cfg, args):
         print("\nNone are old enough to score yet. Check back after a few trading days.")
 
 
+def cmd_news_archive(cfg, args):
+    """Download the historical news the news test needs. Safe to re-run: finished months are skipped."""
+    from tradebot import news_archive
+
+    nt = cfg["news_test"]
+    secrets = load_secrets()
+    if not secrets["alpaca_key"] or not secrets["alpaca_secret"]:
+        sys.exit("The news archive needs ALPACA_API_KEY / ALPACA_SECRET_KEY in .env")
+    symbols = sorted(set(nt["universe"]) | set(nt.get("aliases") or {}))
+    start = (pd.Timestamp(nt["start"]) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    conn = news_archive.connect(ROOT / nt["archive_path"])
+    print(f"Downloading news tagged with {len(symbols)} tickers since {start}")
+    fetched = news_archive.download(conn, secrets["alpaca_key"], secrets["alpaca_secret"],
+                                    symbols, start)
+    stored = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    print(f"Fetched {fetched} articles this run; {stored} stored in {nt['archive_path']}")
+
+
+def cmd_news_test(cfg, args):
+    """Research only: nothing here trades."""
+    from tradebot import news_archive, newstest
+
+    nt = cfg["news_test"]
+    archive = ROOT / nt["archive_path"]
+    if not archive.exists():
+        sys.exit("No news archive yet. Run: python main.py news-archive")
+    articles = news_archive.load_articles(news_archive.connect(archive))
+    conn = db.connect(cfg["db_path"])
+    prices = db.load_ohlcv(conn, nt["universe"])
+    have = set(prices["symbol"])
+    missing = [s for s in nt["universe"] if s not in have]
+    if len(have) < 10:
+        sys.exit("Too few symbols have prices. Run: python main.py fetch " + " ".join(nt["universe"]))
+    result = newstest.run(articles, prices, universe=[s for s in nt["universe"] if s in have],
+                          aliases=nt.get("aliases") or {}, start=nt["start"], no_prices=missing,
+                          settings=newstest.Settings(cost_bps=cfg["backtest"]["cost_bps"]))
+    report = newstest.render(result)
+    print(report)
+    REPORTS.mkdir(exist_ok=True)
+    path = REPORTS / "news_test_report.md"
+    path.write_text(report + "\n", encoding="utf-8")
+    print(f"\nSaved {path}")
+
+
 def _in_cooldown(conn, symbol, risk) -> bool:
     stopped = db.last_stop_date(conn, symbol)
     if stopped is None:
@@ -470,6 +543,8 @@ def build_parser():
     sub.add_parser("init")
     f = sub.add_parser("fetch"); f.add_argument("symbols", nargs="*")
     f.add_argument("--full", action="store_true", help="re-download full history instead of resuming")
+    f.add_argument("--source", choices=["yahoo", "alpaca"], default="yahoo",
+                   help="alpaca: for stocks Yahoo no longer serves, such as delisted ones")
     q = sub.add_parser("quote"); q.add_argument("symbols", nargs="*")
     b = sub.add_parser("backtest"); b.add_argument("symbol"); b.add_argument("strategy", choices=list(STRATEGIES))
     b.add_argument("--no-stop", action="store_true", help="leave out the stop-loss")
@@ -486,6 +561,8 @@ def build_parser():
     r.add_argument("--show-prompt", action="store_true",
                    help="print what would be sent to the model, and send nothing")
     sub.add_parser("research-score", help="compare past research notes with what prices did next")
+    sub.add_parser("news-archive", help="download historical news for the news test (resumable)")
+    sub.add_parser("news-test", help="walk-forward test: does past news predict the next session?")
     pp = sub.add_parser("paper"); pp.add_argument("--execute", action="store_true")
     lt = sub.add_parser("log-trade", help="record a manual (e.g. Fidelity) trade")
     lt.add_argument("side", choices=["buy", "sell"])
@@ -503,6 +580,7 @@ COMMANDS = {
     "init": cmd_init, "fetch": cmd_fetch, "quote": cmd_quote, "backtest": cmd_backtest,
     "backtest-all": cmd_backtest_all, "walk-forward": cmd_walk_forward,
     "signals": cmd_signals, "research": cmd_research, "research-score": cmd_research_score,
+    "news-archive": cmd_news_archive, "news-test": cmd_news_test,
     "paper": cmd_paper,
     "log-trade": cmd_log_trade, "report": cmd_report,
 }

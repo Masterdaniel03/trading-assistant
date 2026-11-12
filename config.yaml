@@ -44,6 +44,16 @@ research:
   news_lookback_days: 3        # covers a weekend
   max_news_items: 12           # per symbol, most focused and newest first
 
+# News test (research only): does past news predict the next session's move?
+# The universe is the Dow 30 as it stood on the start date. Fixing the list up
+# front means the choice of stocks uses no hindsight about who did well later.
+news_test:
+  start: "2020-01-01"
+  universe: [AAPL, AXP, BA, CAT, CSCO, CVX, DIS, DOW, GS, HD, IBM, INTC, JNJ, JPM, KO,
+             MCD, MMM, MRK, MSFT, NKE, PFE, PG, RTX, TRV, UNH, V, VZ, WBA, WMT, XOM]
+  aliases: {UTX: RTX}          # old ticker -> today's, for news tagged before the rename
+  archive_path: data/news_archive.db
+
 # Hard limits enforced by the paper/live bot before any order is sent.
 risk:
   max_position_pct: 0.20       # no single symbol above 20% of equity

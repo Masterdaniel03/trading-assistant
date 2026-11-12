@@ -135,6 +135,15 @@ def load_close(conn: sqlite3.Connection, symbol: str) -> pd.Series:
     return df.set_index("date")["close"].rename(symbol)
 
 
+def load_ohlcv(conn: sqlite3.Connection, symbols: list[str]) -> pd.DataFrame:
+    """Long table of daily bars for several symbols: symbol, date, open, close, volume."""
+    marks = ",".join("?" * len(symbols))
+    return pd.read_sql_query(
+        f"""SELECT symbol, date, open, close, volume FROM prices
+            WHERE symbol IN ({marks}) AND close IS NOT NULL AND open IS NOT NULL
+            ORDER BY date, symbol""", conn, params=list(symbols), parse_dates=["date"])
+
+
 def last_price_date(conn: sqlite3.Connection, symbol: str) -> str | None:
     row = conn.execute("SELECT MAX(date) FROM prices WHERE symbol = ? AND close IS NOT NULL",
                        (symbol,)).fetchone()

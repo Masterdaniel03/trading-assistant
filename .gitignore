@@ -6,5 +6,6 @@ venv/
 data/*.db
 reports/*.png
 reports/*.csv
+reports/*.md
 .pytest_cache/
 logs/
