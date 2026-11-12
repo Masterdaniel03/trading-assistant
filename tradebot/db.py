@@ -61,6 +61,26 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     PRIMARY KEY (ts, account)
 );
 
+-- End-of-day account value as the broker reports it (one row per day).
+CREATE TABLE IF NOT EXISTS equity_daily (
+    account TEXT NOT NULL,
+    date    TEXT NOT NULL,         -- YYYY-MM-DD, New York
+    equity  REAL NOT NULL,
+    PRIMARY KEY (account, date)
+);
+
+-- What the account held at the last sync (replaced each time, not a history).
+CREATE TABLE IF NOT EXISTS positions (
+    account         TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    qty             REAL,
+    avg_entry_price REAL,
+    market_value    REAL NOT NULL,
+    unrealized_plpc REAL NOT NULL, -- return from average entry, e.g. -0.08
+    ts              TEXT NOT NULL, -- when this snapshot was taken (UTC)
+    PRIMARY KEY (account, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS news (
     id         TEXT NOT NULL,      -- the provider's article id
     symbol     TEXT NOT NULL,
@@ -225,6 +245,25 @@ def log_equity(conn, account, equity, cash=None, ts=None) -> None:
                        (ts, account)).fetchone():
         ts = (datetime.fromisoformat(ts) + timedelta(microseconds=1)).isoformat(timespec="microseconds")
     conn.execute("INSERT INTO equity_snapshots VALUES (?,?,?,?)", (ts, account, float(equity), cash))
+    conn.commit()
+
+
+def save_equity_daily(conn, account, rows) -> None:
+    """rows: (date, equity) pairs. A day already stored takes the newer value."""
+    conn.executemany("INSERT OR REPLACE INTO equity_daily VALUES (?,?,?)",
+                     [(account, day, float(equity)) for day, equity in rows])
+    conn.commit()
+
+
+def save_positions(conn, account, positions: dict) -> None:
+    """Replace the stored holdings with the current ones.
+    positions: symbol -> object with market_value, unrealized_plpc, qty, avg_entry_price."""
+    ts = now_utc()
+    conn.execute("DELETE FROM positions WHERE account = ?", (account,))
+    conn.executemany(
+        "INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+        [(account, symbol, getattr(p, "qty", None), getattr(p, "avg_entry_price", None),
+          float(p.market_value), float(p.unrealized_plpc), ts) for symbol, p in positions.items()])
     conn.commit()
 
 

@@ -32,6 +32,7 @@ from tradebot.data import (AlpacaQuotes, drop_incomplete_bars, fetch_many, fetch
                            fetch_prices_alpaca, history_was_readjusted, incremental_start,
                            periods_per_year)
 from tradebot.rebalance import plan_orders
+from tradebot.account_sync import sync_account
 from tradebot.runlog import RunLog
 from tradebot.risk import (RiskViolation, check_daily_loss, check_data_fresh, check_live_allowed,
                            stop_loss_pct, triggered_stops)
@@ -420,6 +421,11 @@ def cmd_paper(cfg, args):
         db.log_equity(conn, broker.account_name, acct["equity"], acct["cash"])
         say(f"[{broker.account_name}] equity ${acct['equity']:,.2f}  cash ${acct['cash']:,.2f}")
         _record_earlier_orders(conn, broker, say)
+        held = broker.position_details()
+        try:      # keeps the dashboard's numbers current; never allowed to stop a trading run
+            sync_account(conn, broker, held)
+        except Exception as e:  # noqa: BLE001
+            say(f"Note: could not save account history for the dashboard ({type(e).__name__}: {e})")
 
         # Two guards, two strengths. Old prices make every signal untrustworthy,
         # so only stop-loss exits pass. A big down day blocks adding risk, but
@@ -435,7 +441,6 @@ def cmd_paper(cfg, args):
         except RiskViolation as e:
             daily_loss = str(e)
 
-        held = broker.position_details()
         stops = triggered_stops({s: p.unrealized_plpc for s, p in held.items()}, risk)
         for sym, pl in stops.items():
             say(f"  STOP  {sym:<6} {pl:+.1%} (limit {-stop_loss_pct(risk):+.1%})")

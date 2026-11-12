@@ -13,6 +13,8 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
                 │
           rebalance.py + risk.py ──► broker.py ──► Alpaca (paper)
                                                     
+  SQLite ──► dashboard_data.py ──► dashboard.py (Streamlit, read-only)
+                                                    
   manual Fidelity trades ──► `log-trade` ──► trades table (followed_ai flag)
 
   Alpaca news ──► news.py ──► research.py ──► Gemini ──► answer checked ──► signals (llm_news)
@@ -49,6 +51,7 @@ python main.py fetch
 | `python main.py paper` | Dry run: shows orders the bot would send |
 | `python main.py paper --execute` | Sends those orders to Alpaca paper. Every run, dry or not, is appended to `logs/paper_trading.log`; the next run records what each earlier order filled at |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
+| `streamlit run dashboard.py` | Open the dashboard in your browser (see below). Read-only: it never places an order |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
 | `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, paper runs, research checks, DB) |
 
@@ -79,6 +82,17 @@ No prediction may use anything that was not yet known:
 
 The report includes the point-in-time audit, rank IC, a long-short return before and after costs, a shuffled-dates test, and a deliberately leaky version that shows what look-ahead would look like. All settings were fixed before the first run; changing them to improve the result would be its own form of look-ahead.
 
+## Dashboard
+`streamlit run dashboard.py` opens a local page with:
+- **Headline numbers:** account value, return since the first trade, SPY over the same days, the worst drop from a peak, and the Sharpe ratio (shown only after 20 trading days, because before that it is noise).
+- **Account value vs SPY buy and hold:** both lines start from the same dollar amount on the day of the first order, so they share one axis.
+- **Holdings and orders:** each holding's share of the account against its cap, its return since entry and how far it is from its stop-loss; every order with its status and fill price.
+- **Signals and research:** the bot's latest signal next to the latest research note for each symbol, whether they agree, and how past notes turned out.
+- **Your own trades:** manual trades valued at the latest close, next to what the same dollars would have made in SPY, split by whether you followed the AI.
+- **Backtests:** the walk-forward summary and the news test report.
+
+The page reads the local database only. The broker-side numbers (balance, holdings, order results, daily account value) are refreshed by every `python main.py paper` run and by the page's **Refresh from Alpaca** button, which sends no orders. Prices and signals update when you run `fetch` and `paper`.
+
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
 - Max 20% of equity in any one symbol, no margin, and no new buys after a 3% daily loss (sells that reduce risk still go through).
@@ -101,7 +115,7 @@ After the day's prices are final (1:15 pm Pacific, 15 minutes after the close): 
 - [x] Phase 3a: LLM research layer (recent news → a checked stance with written reasoning, stored in `signals.reason`; forward scoring)
 - [ ] Phase 3b: earnings dates and filings as extra research inputs; decide from the scores whether the notes should influence the bot
 - [x] Phase 3c: point-in-time news test (walk-forward, headlines → next session)
-- [ ] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
+- [x] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
 - [ ] Phase 5: write-up of results (including what didn't work)
 
 ## Notes on honest evaluation

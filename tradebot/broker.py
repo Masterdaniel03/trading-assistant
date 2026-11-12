@@ -34,6 +34,8 @@ def _status(exc) -> int | None:
 class PositionInfo:
     market_value: float
     unrealized_plpc: float  # return from average entry, e.g. -0.08
+    qty: float = 0.0
+    avg_entry_price: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,24 @@ class AlpacaBroker:
 
     def position_details(self) -> dict[str, PositionInfo]:
         ps = call_with_retry(self.client.get_all_positions, what="alpaca positions")
-        return {p.symbol: PositionInfo(float(p.market_value), float(p.unrealized_plpc or 0))
+        return {p.symbol: PositionInfo(float(p.market_value), float(p.unrealized_plpc or 0),
+                                       float(p.qty or 0), float(p.avg_entry_price or 0))
                 for p in ps}
+
+    def equity_history(self) -> list[tuple[str, float]]:
+        """End-of-day account value for up to a year: [(YYYY-MM-DD, equity), ...].
+
+        Alpaca stamps each day in the evening New York time, and pads the days
+        before the account existed with zeros, which are left out here."""
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        history = call_with_retry(self.client.get_portfolio_history,
+                                  GetPortfolioHistoryRequest(period="1A", timeframe="1D"),
+                                  what="alpaca equity history")
+        new_york = ZoneInfo("America/New_York")
+        return [(datetime.fromtimestamp(stamp, new_york).date().isoformat(), float(equity))
+                for stamp, equity in zip(history.timestamp or [], history.equity or [])
+                if equity]
 
     def is_market_open(self) -> bool:
         return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)

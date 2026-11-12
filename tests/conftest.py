@@ -29,6 +29,7 @@ class FakeBroker:
     fail_on: set = set()          # symbols whose orders the broker rejects
     market_open = True
     expected_session = None       # None = today; the session whose prices should be stored
+    history: list = []            # (date, equity) pairs the broker reports
     last = None
 
     def __init__(self, *args, **kwargs):
@@ -43,6 +44,9 @@ class FakeBroker:
 
     def open_order_symbols(self):
         return set(FakeBroker.open_symbols)
+
+    def equity_history(self):
+        return list(FakeBroker.history)
 
     def last_completed_session(self):
         return FakeBroker.expected_session or date.today().isoformat()
@@ -84,6 +88,7 @@ def bot(tmp_path, monkeypatch):
     FakeBroker.order_updates, FakeBroker.fail_on = {}, set()
     FakeBroker.market_open = True
     FakeBroker.expected_session = None
+    FakeBroker.history = []
 
     def store(symbol, days_old=0, n=5):
         last = date.today() - timedelta(days=days_old)
