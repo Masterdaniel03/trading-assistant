@@ -22,7 +22,6 @@ import argparse
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pandas as pd
 
@@ -501,7 +500,7 @@ def cmd_paper(cfg, args):
                          status=enum_text(getattr(resp, "status", None)))
             if o.symbol in stops:
                 db.log_stop(conn, o.symbol,
-                            db.last_price_date(conn, o.symbol) or expected,
+                            db.last_price_date(conn, o.symbol) or expected or db.now_utc()[:10],
                             stops[o.symbol])
             say(f"  sent {side} {o.symbol} ${o.notional:,.2f}  (order {order_id})")
         say(f"Result: {len(orders) - len(failed)} of {len(orders)} orders sent.")
