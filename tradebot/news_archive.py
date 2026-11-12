@@ -27,7 +27,7 @@ from tradebot.retry import RetryPolicy, call_with_retry
 
 URL = "https://data.alpaca.markets/v1beta1/news"
 PAGE_SIZE = 50
-MIN_INTERVAL_S = 0.35     # between requests; keeps us under Alpaca's 200 requests a minute
+MIN_INTERVAL_S = 0.32     # from one request to the next; under Alpaca's 200 requests a minute
 POLICY = RetryPolicy(attempts=6, base_delay=2.0, rate_limit_delay=15.0, max_delay=60.0)
 
 SCHEMA = """
@@ -82,7 +82,8 @@ def save_articles(conn: sqlite3.Connection, rows: list[dict]) -> None:
 
 def download(conn: sqlite3.Connection, key: str, secret: str, symbols: list[str], start: str,
              end: str | None = None, say: Callable[[str], None] = print, session=None,
-             sleep: Callable[[float], None] = time.sleep, now: pd.Timestamp | None = None) -> int:
+             sleep: Callable[[float], None] = time.sleep, now: pd.Timestamp | None = None,
+             clock: Callable[[], float] = time.monotonic) -> int:
     """Fetch all articles tagged with any of `symbols` from `start` up to `end` (default: now).
 
     Returns the number of articles fetched this run. Months already finished
@@ -113,13 +114,14 @@ def download(conn: sqlite3.Connection, key: str, secret: str, symbols: list[str]
         count, token = 0, None
         while True:
             page = dict(params, page_token=token) if token else params
+            asked = clock()
             body = call_with_retry(_get_page, session, headers, page, policy=POLICY,
                                    sleep=sleep, what=f"alpaca news archive {label}")
             rows = body.get("news") or []
             save_articles(conn, rows)
             count += len(rows)
             token = body.get("next_page_token")
-            sleep(MIN_INTERVAL_S)
+            sleep(max(0.0, MIN_INTERVAL_S - (clock() - asked)))   # only what the request didn't use
             if not token:
                 break
         total += count

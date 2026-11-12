@@ -36,7 +36,7 @@ python main.py fetch
 
 | Command | What it does |
 |---|---|
-| `python main.py fetch [SYMBOLS...] [--full]` | Download/refresh daily prices (resumes from the last stored date; refetches full history automatically after a split/dividend re-adjustment) |
+| `python main.py fetch [SYMBOLS...] [--full] [--source alpaca]` | Download/refresh daily prices (resumes from the last stored date; refetches full history automatically after a split/dividend re-adjustment). `--source alpaca` gets them from Alpaca instead of Yahoo, for stocks Yahoo no longer serves, such as delisted ones |
 | `python main.py quote [SYMBOLS...]` | Real-time bid/ask from Alpaca (free IEX feed for stocks; crypto needs no keys) |
 | `python main.py backtest SPY sma_crossover` | Backtest one strategy vs buy & hold, save chart to `reports/` |
 | `python main.py backtest-all` | Every watchlist symbol × strategy → `reports/backtest_summary.csv` |
@@ -44,6 +44,8 @@ python main.py fetch
 | `python main.py signals` | Today's target positions (also logged to the DB) |
 | `python main.py research [SYMBOLS...] [--refresh] [--show-prompt]` | An LLM reads the last few days of news and writes a stance with reasons (advisory; see below). `--show-prompt` prints what would be sent and sends nothing |
 | `python main.py research-score` | Average return after bullish / neutral / bearish notes, once they are old enough to score |
+| `python main.py news-archive` | Download historical news for the news test (resumable; about 10 minutes the first time) |
+| `python main.py news-test` | Walk-forward test: does past news predict the next session? → `reports/news_test_report.md` (see below) |
 | `python main.py paper` | Dry run: shows orders the bot would send |
 | `python main.py paper --execute` | Sends those orders to Alpaca paper. Every run, dry or not, is appended to `logs/paper_trading.log`; the next run records what each earlier order filled at |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
@@ -64,6 +66,18 @@ The answer is kept only if it passes these checks:
 A kept answer is logged as a signal with strategy `llm_news`, with the reasoning in `signals.reason`. A failed answer is stored as rejected with the reason, and logs no signal. With no recent news the model is not called. Every attempt is in the `research` table and every run in `logs/research.log`. The same inputs reuse the stored answer, which saves free-tier quota.
 
 **The bot does not trade on these notes.** An LLM's view can't be backtested honestly, because the model may already know what happened next. The only fair test is forward: log the notes now and compare them with later prices using `research-score`.
+
+## News test
+`python main.py news-test` asks one question: do headlines that were already public before the open predict how a stock does that day, relative to the others? It is research only and places no trades. The universe is the 30 Dow stocks as of 2020-01-01, fixed up front so the choice uses no hindsight.
+
+No prediction may use anything that was not yet known:
+- **When a headline is known.** The archive serves each article's latest text, so a headline counts as known from its last revision. Articles revised more than an hour after publication are dropped.
+- **Which session it can affect.** The decision for a trading day is made at 09:00 New York. News after that waits for the next session.
+- **What is predicted.** The day's open-to-close return minus the universe average, which starts after the decision.
+- **What the model learns from.** The text model's vocabulary and weights are refitted each quarter on past sessions only.
+- **Controls** (momentum, volatility, trading volume) use prices up to the previous close.
+
+The report includes the point-in-time audit, rank IC, a long-short return before and after costs, a shuffled-dates test, and a deliberately leaky version that shows what look-ahead would look like. All settings were fixed before the first run; changing them to improve the result would be its own form of look-ahead.
 
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
@@ -86,6 +100,7 @@ After the day's prices are final (1:15 pm Pacific, 15 minutes after the close): 
 - [ ] Phase 2b: crypto on Alpaca (`BTC/USD`)
 - [x] Phase 3a: LLM research layer (recent news → a checked stance with written reasoning, stored in `signals.reason`; forward scoring)
 - [ ] Phase 3b: earnings dates and filings as extra research inputs; decide from the scores whether the notes should influence the bot
+- [x] Phase 3c: point-in-time news test (walk-forward, headlines → next session)
 - [ ] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
 - [ ] Phase 5: write-up of results (including what didn't work)
 
