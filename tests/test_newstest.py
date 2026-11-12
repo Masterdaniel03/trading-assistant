@@ -135,6 +135,17 @@ def test_controls_never_use_the_current_day():
     assert not before["open_close"].iloc[-1].equals(after["open_close"].iloc[-1])
 
 
+def test_usual_level_uses_only_earlier_sessions():
+    days = pd.bdate_range("2026-01-05", periods=6)
+    sentiment = pd.DataFrame({"A": [0.2, 0.4, 0.6, 0.8, 1.0, -5.0]}, index=days)
+    level = newstest.usual_level(sentiment, window=3, min_periods=2)
+    assert level["A"].isna().tolist() == [True, True, False, False, False, False]
+    assert level["A"].iloc[2:].tolist() == pytest.approx([0.3, 0.4, 0.6, 0.8])   # mean of the 3 before
+    # today's own value (-5.0 on the last day) never enters today's level
+    changed = newstest.usual_level(sentiment.assign(A=[0.2, 0.4, 0.6, 0.8, 1.0, 99.0]), 3, 2)
+    assert changed.equals(level)
+
+
 # ---------------------------------------------------------------- rule 4: walk-forward
 
 def test_splits_never_overlap_and_training_always_ends_before_testing():

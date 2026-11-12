@@ -82,6 +82,7 @@ class Settings:
     max_features: int = 20000
     permutations: int = 500
     seed: int = 0
+    level_window: int = 250             # sessions used for a stock's "usual" sentiment (one year)
 
 
 # ---------------------------------------------------------------- 1. which text is usable
@@ -214,6 +215,18 @@ def sentiment_panel(items: pd.DataFrame, days: pd.DatetimeIndex, universe: list[
         return (series.unstack("symbol").reindex(index=days, columns=universe).fillna(0.0))
 
     return wide(score), wide(count)
+
+
+def usual_level(sentiment: pd.DataFrame, window: int = 250, min_periods: int = 60) -> pd.DataFrame:
+    """Each stock's average sentiment over the previous `window` sessions, not
+    counting the current one.
+
+    Some companies simply get more upbeat coverage than others. Separating that
+    standing level from the day's news shows whether a result comes from news
+    ARRIVING (today minus the usual level) or only from WHICH stocks tend to
+    get good news (the usual level alone). The second is not news timing at all.
+    """
+    return sentiment.shift(1).rolling(window, min_periods=min_periods).mean()
 
 
 # ---------------------------------------------------------------- 3. what is predicted
@@ -462,6 +475,8 @@ class Result:
     controls: pd.DataFrame
     liquidity: dict[str, dict]
     yearly: pd.DataFrame = field(default_factory=pd.DataFrame)
+    level_vs_timing: dict[str, dict] = field(default_factory=dict)
+    liquidity_timing: dict[str, dict] = field(default_factory=dict)
 
 
 def evaluate(signal: pd.DataFrame, panels: dict, days, settings: Settings) -> dict:
@@ -527,12 +542,25 @@ def run(articles: pd.DataFrame, prices: pd.DataFrame, universe: list[str],
         settings.min_names)
     liquidity = ic_by_liquidity(sentiment.loc[oos], excess_oos, panels["dollar_volume_20d"].loc[oos])
 
+    # Level versus timing: is it the news arriving, or just which stocks get good news?
+    level = usual_level(sentiment, settings.level_window)
+    surprise = sentiment - level
+    level_vs_timing = {
+        "each stock's usual sentiment over the past year, ignoring today's news":
+            evaluate(level, panels, oos, settings),
+        "today's sentiment minus that usual level (the news itself)":
+            evaluate(surprise, panels, oos, settings),
+    }
+    liquidity_timing = ic_by_liquidity(surprise.loc[oos], excess_oos,
+                                       panels["dollar_volume_20d"].loc[oos])
+
     yearly = pd.DataFrame({name: scored[name]["ic_series"].groupby(lambda d: d.year).mean()
                            for name in main})
     return Result(settings=settings, universe=universe, no_prices=list(no_prices or []),
                   period=(days[0], days[-1]), oos_period=(oos[0], oos[-1]), counts=counts,
                   coverage=coverage, audit=audit, folds=folds, signals=scored, leaky=leaky,
-                  permutation=permutation, controls=controls, liquidity=liquidity, yearly=yearly)
+                  permutation=permutation, controls=controls, liquidity=liquidity, yearly=yearly,
+                  level_vs_timing=level_vs_timing, liquidity_timing=liquidity_timing)
 
 
 # ---------------------------------------------------------------- the report
@@ -542,7 +570,7 @@ def verdict(t_stat: float) -> str:
         return "could not be measured"
     if abs(t_stat) < 2:
         return "not distinguishable from zero"
-    return "positive and statistically clear" if t_stat > 0 else "negative and statistically clear"
+    return "positive (|t| above 2)" if t_stat > 0 else "negative (|t| above 2)"
 
 
 def render(r: Result) -> str:
@@ -567,11 +595,11 @@ def render(r: Result) -> str:
     out += ["- Result: PASS (the run stops with an error if any check fails)", ""]
 
     out += ["## Results (out of sample)", "",
-            "| Signal | Days | Rank IC | t | Days IC>0 | L/S gross /yr | L/S net /yr | Sharpe net | Break-even cost |",
+            "| Signal | Days | Rank IC | t | L/S gross /yr | Sharpe gross | L/S net /yr | Sharpe net | Break-even cost |",
             "|---|---|---|---|---|---|---|---|---|"]
     for name, e in r.signals.items():
         out.append(f"| {name} | {e['ic']['days']} | {e['ic']['mean']:+.4f} | {e['ic']['t_stat']:+.2f} | "
-                   f"{e['ic']['share_positive']:.0%} | {e['gross']['annual_return']:+.1%} | "
+                   f"{e['gross']['annual_return']:+.1%} | {e['gross']['sharpe']:+.2f} | "
                    f"{e['net']['annual_return']:+.1%} | {e['net']['sharpe']:+.2f} | "
                    f"{e['break_even_bps']:+.2f} bps |")
     out += ["", f"Costs assumed: {s.cost_bps:g} bps per trade. The strategy opens and closes both "
@@ -583,6 +611,14 @@ def render(r: Result) -> str:
     for name, p in r.permutation.items():
         out.append(f"- {name}: real rank IC {p['real']:+.4f}; shuffled {p['shuffled_mean']:+.4f} "
                    f"+/- {p['shuffled_std']:.4f}; p = {p['p_value']:.3f}")
+    out += ["", "A shuffled result away from zero means part of the real one does not depend on "
+                "timing at all. The next check separates the two.", "",
+            "**Level versus timing** (is it the news arriving, or just which stocks tend to get "
+            "good news? This check was added after the first run, when the shuffled result came "
+            "out away from zero; the settings and results above were not changed):", ""]
+    out += [f"- {name}: rank IC {e['ic']['mean']:+.4f}, t = {e['ic']['t_stat']:+.2f}, "
+            f"L/S gross {e['gross']['annual_return']:+.1%} a year"
+            for name, e in r.level_vs_timing.items()]
     e = r.leaky
     out += ["", "**What look-ahead would look like** (deliberately wrong: news written during a "
                 "session 'predicting' that same session):", "",
@@ -592,9 +628,12 @@ def render(r: Result) -> str:
             "same-day regression across stocks, averaged over days):", ""]
     out += [f"- {name}: {row.bps_per_sd:+.2f} bps, t = {row.t_stat:+.2f}"
             for name, row in r.controls.iterrows()]
-    out += ["", "**By trading volume** (word-list sentiment, rank IC within each third):", ""]
-    out += [f"- {name}: {g['mean']:+.4f}, t = {g['t_stat']:+.2f} ({g['days']} days)"
-            for name, g in r.liquidity.items()]
+    out += ["", "**By trading volume** (rank IC within each third of the universe; first the "
+                "word-list sentiment, then the same with each stock's usual level removed):", ""]
+    for name, g in r.liquidity.items():
+        t = r.liquidity_timing.get(name, {})
+        out.append(f"- {name}: {g['mean']:+.4f}, t = {g['t_stat']:+.2f}; usual level removed: "
+                   f"{t.get('mean', float('nan')):+.4f}, t = {t.get('t_stat', float('nan')):+.2f}")
     out += ["", "**By year** (mean rank IC):", ""]
     out += [f"- {year}: " + ", ".join(f"{col.split(',')[0].split(' (')[0]} {row[col]:+.4f}"
                                        for col in r.yearly.columns)
@@ -606,4 +645,10 @@ def render(r: Result) -> str:
         out.append(f"- {name}: rank IC is {verdict(e['ic']['t_stat'])} "
                    f"(t = {e['ic']['t_stat']:+.2f}); after costs the long-short return is "
                    f"{e['net']['annual_return']:+.1%} a year.")
+    for name, e in r.level_vs_timing.items():
+        out.append(f"- {name}: rank IC is {verdict(e['ic']['t_stat'])} (t = {e['ic']['t_stat']:+.2f}).")
+    out += ["", "About ten signals and sub-groups are scored in this report. With that many, one "
+                "|t| above 2 is expected by chance alone, so a single such value is weak evidence. "
+                "A real effect should also survive the shuffled-dates test and the level-versus-"
+                "timing check, and be larger than the break-even cost."]
     return "\n".join(out)
