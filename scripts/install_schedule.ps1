@@ -18,7 +18,9 @@ if ($Remove) {
 }
 
 $root = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $root ".venv\Scripts\python.exe"
+# pythonw: runs without a console window, so there is nothing on screen to close by
+# accident (closing the window kills the run). Everything still goes to logs\.
+$python = Join-Path $root ".venv\Scripts\pythonw.exe"
 if (-not (Test-Path $python)) { throw "Python not found at $python. Create the .venv first." }
 
 $action = New-ScheduledTaskAction -Execute $python -Argument "main.py daily" -WorkingDirectory $root

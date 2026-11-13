@@ -612,7 +612,9 @@ COMMANDS = {
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         # News text can hold characters a Windows console can't print; show "?" rather than crash.
-        stream.reconfigure(errors="replace")
+        # Under pythonw (the scheduled task, no window) there is no console: stream is None.
+        if stream is not None:
+            stream.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args()
     COMMANDS[args.cmd](load_config(), args)
