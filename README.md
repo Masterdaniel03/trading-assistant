@@ -105,8 +105,15 @@ The page reads the local database only. The broker-side numbers (balance, holdin
 - `paper` is a dry run unless you pass `--execute`.
 - Never commit `.env`. Never give any key withdrawal permissions.
 
-## Daily routine (once it runs)
-After the day's prices are final (1:15 pm Pacific, 15 minutes after the close): `fetch` → `signals` → `paper --execute`. Orders sent then fill at the next open. Log any Fidelity trades the same day. A cron job or GitHub Actions schedule can automate the first three.
+## Daily routine (automatic)
+`python main.py daily` runs the whole day in one go: `fetch`, then `research`, then `paper --execute`. On the last trading day of each week it also updates the news archive and re-runs `walk-forward` and `news-test`. It skips weekends and market holidays (using Alpaca's calendar). Each step runs separately, so one failure doesn't stop the rest, and everything is appended to `logs/daily_run.log`.
+
+To run it automatically on weekdays at 2:30 pm (after the day's prices are final):
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1          # install
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Remove  # remove
+```
+The PC has to be on (or asleep, which Windows can wake it from). If it was off at 2:30 pm, the run starts as soon as it's back on. Orders fill at the next market open by themselves; nobody needs to be awake for that. Log any Fidelity trades yourself with `log-trade`.
 
 ## Roadmap
 - [x] Phase 1: data pipeline, SQLite logging, backtester, 2 baseline strategies, Alpaca paper bot, manual trade log

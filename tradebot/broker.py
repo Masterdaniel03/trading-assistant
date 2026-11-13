@@ -100,6 +100,17 @@ class AlpacaBroker:
     def is_market_open(self) -> bool:
         return bool(call_with_retry(self.client.get_clock, what="alpaca clock").is_open)
 
+    def trading_days(self, back: int = 10, ahead: int = 10) -> list[str]:
+        """Exchange trading days (YYYY-MM-DD) around today, from Alpaca's calendar."""
+        from alpaca.trading.requests import GetCalendarRequest
+
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        calendar = call_with_retry(
+            self.client.get_calendar,
+            GetCalendarRequest(start=today - timedelta(days=back), end=today + timedelta(days=ahead)),
+            what="alpaca calendar")
+        return [c.date.isoformat() for c in calendar]
+
     def last_completed_session(self) -> str | None:
         """The exchange's latest session whose daily prices should be available
         by now, from Alpaca's trading calendar (it knows holidays)."""

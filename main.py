@@ -22,6 +22,7 @@ import argparse
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -523,6 +524,24 @@ def cmd_log_trade(cfg, args):
     print(f"Logged trade #{tid}: {args.side} {args.qty} {args.symbol.upper()} @ {args.price} ({args.account})")
 
 
+def cmd_daily(cfg, args):
+    """Unattended daily run (what the scheduled task starts). See tradebot/daily.py."""
+    from tradebot.broker import AlpacaBroker
+    from tradebot.daily import daily_run
+
+    secrets = load_secrets()
+    try:
+        broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
+        sessions = broker.trading_days()
+    except Exception as e:  # noqa: BLE001 - recorded, then stop: without the calendar we can't know
+        with RunLog(LOGS / "daily_run.log", "daily run"):
+            sys.exit(f"Could not read the exchange calendar ({type(e).__name__}: {e}); nothing was run.")
+    today = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    results = daily_run(ROOT, sessions, today)
+    if any(code != 0 for _, code in results):
+        sys.exit(1)
+
+
 def cmd_report(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
@@ -577,6 +596,7 @@ def build_parser():
     lt.add_argument("--followed-ai", choices=["yes", "no"])
     lt.add_argument("--notes")
     sub.add_parser("report")
+    sub.add_parser("daily", help="fetch, research and paper --execute in one go (for the scheduled task)")
     return p
 
 
@@ -585,7 +605,7 @@ COMMANDS = {
     "backtest-all": cmd_backtest_all, "walk-forward": cmd_walk_forward,
     "signals": cmd_signals, "research": cmd_research, "research-score": cmd_research_score,
     "news-archive": cmd_news_archive, "news-test": cmd_news_test,
-    "paper": cmd_paper,
+    "paper": cmd_paper, "daily": cmd_daily,
     "log-trade": cmd_log_trade, "report": cmd_report,
 }
 
