@@ -14,6 +14,12 @@ RISK = {"max_position_pct": 0.20, "max_total_exposure_pct": 1.0, "max_risk_per_p
         "allow_live": False}
 
 
+@pytest.fixture(autouse=True)
+def no_real_alerts(monkeypatch):
+    """Tests must never pop a Windows notification or message a phone."""
+    monkeypatch.setenv("TRADEBOT_ALERTS", "off")
+
+
 @pytest.fixture
 def risk():
     return dict(RISK)

@@ -113,6 +113,59 @@ CREATE TABLE IF NOT EXISTS research (
     input_tokens  INTEGER,
     output_tokens INTEGER
 );
+
+-- Things the user should hear about: a failed run, a stop-loss, a blocked day.
+CREATE TABLE IF NOT EXISTS alerts (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT NOT NULL,       -- UTC
+    level     TEXT NOT NULL,       -- info | warning | error
+    source    TEXT,                -- which part raised it, e.g. daily, paper
+    title     TEXT NOT NULL,
+    detail    TEXT,
+    delivered TEXT,                -- channels that took it, e.g. "desktop, ntfy"
+    failed    TEXT,                -- channels that did not, with the reason
+    read      INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per unattended run, so the dashboard can show what happened without the log file.
+CREATE TABLE IF NOT EXISTS daily_runs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session  TEXT NOT NULL,        -- the New York trading day the run was for
+    started  TEXT NOT NULL,        -- UTC
+    finished TEXT,
+    status   TEXT NOT NULL,        -- running | ok | failed
+    steps    TEXT                  -- JSON list of {name, code, seconds, output}
+);
+
+-- Small switches set from the dashboard or the command line (e.g. paused = 1).
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    ts    TEXT NOT NULL
+);
+
+-- The bot league: simulated bots, each with its own strategy and list of symbols.
+CREATE TABLE IF NOT EXISTS league_bots (
+    name      TEXT PRIMARY KEY,
+    spec      TEXT NOT NULL,       -- JSON of everything that decides its trades
+    frozen_on TEXT NOT NULL,       -- last price date when this spec was first seen;
+                                   -- days after it are the live (no-hindsight) record
+    updated   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS league_equity (
+    bot TEXT NOT NULL, date TEXT NOT NULL, equity REAL NOT NULL, cash REAL NOT NULL,
+    PRIMARY KEY (bot, date)
+);
+CREATE TABLE IF NOT EXISTS league_trades (
+    bot TEXT NOT NULL, date TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
+    qty REAL NOT NULL, price REAL NOT NULL, notional REAL NOT NULL, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS league_trades_bot ON league_trades (bot, date);
+CREATE TABLE IF NOT EXISTS league_positions (
+    bot TEXT NOT NULL, symbol TEXT NOT NULL, qty REAL NOT NULL, entry_price REAL,
+    last_price REAL, value REAL NOT NULL,
+    PRIMARY KEY (bot, symbol)
+);
 """
 
 
@@ -311,3 +364,53 @@ def find_research(conn, cache_key: str) -> dict | None:
 
 def research_df(conn) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM research ORDER BY id", conn)
+
+
+# ---------- alerts, runs, settings ----------
+def add_alert(conn, level, title, detail=None, source=None, delivered=None, failed=None) -> int:
+    cur = conn.execute(
+        "INSERT INTO alerts (ts, level, source, title, detail, delivered, failed) VALUES (?,?,?,?,?,?,?)",
+        (now_utc(), level, source, title, detail, delivered, failed))
+    conn.commit()
+    return cur.lastrowid
+
+
+def alerts_df(conn, unread_only: bool = False, limit: int = 100) -> pd.DataFrame:
+    where = "WHERE read = 0" if unread_only else ""
+    return pd.read_sql_query(f"SELECT * FROM alerts {where} ORDER BY id DESC LIMIT ?", conn, params=(limit,))
+
+
+def mark_alerts_read(conn) -> None:
+    conn.execute("UPDATE alerts SET read = 1 WHERE read = 0")
+    conn.commit()
+
+
+def start_run(conn, session: str) -> int:
+    cur = conn.execute("INSERT INTO daily_runs (session, started, status) VALUES (?,?,'running')",
+                       (session, now_utc()))
+    conn.commit()
+    return cur.lastrowid
+
+
+def finish_run(conn, run_id: int, status: str, steps_json: str) -> None:
+    conn.execute("UPDATE daily_runs SET finished = ?, status = ?, steps = ? WHERE id = ?",
+                 (now_utc(), status, steps_json, run_id))
+    conn.commit()
+
+
+def runs_df(conn, limit: int = 30) -> pd.DataFrame:
+    return pd.read_sql_query("SELECT * FROM daily_runs ORDER BY id DESC LIMIT ?", conn, params=(limit,))
+
+
+def get_setting(conn, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO settings VALUES (?,?,?)", (key, str(value), now_utc()))
+    conn.commit()
+
+
+def is_paused(conn) -> bool:
+    return get_setting(conn, "paused", "0") == "1"

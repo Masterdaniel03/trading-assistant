@@ -13,6 +13,10 @@
     python main.py news-test                 # does past news predict the next session? (walk-forward)
     python main.py paper                     # dry run: show orders the bot WOULD place
     python main.py paper --execute           # actually send them to Alpaca paper
+    python main.py league                    # replay every league bot and print the leaderboard
+    python main.py pause | resume            # stop the paper bot from buying / let it buy again
+    python main.py alerts                    # recent alerts; `alert-test` sends a test one
+    python main.py dashboard                 # open the web dashboard
     python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "SMA signal"
     python main.py report                    # summary of trades logged
 """
@@ -27,6 +31,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from tradebot import db
+from tradebot.alerts import raise_alert
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest, with_stop_loss
 from tradebot.config import ROOT, load_config, load_secrets
 from tradebot.data import (AlpacaQuotes, drop_incomplete_bars, fetch_many, fetch_prices,
@@ -44,6 +49,20 @@ REPORTS = ROOT / "reports"
 LOGS = ROOT / "logs"
 
 
+def _alert(cfg, conn, level, title, detail="", source=""):
+    """Store an alert and send it to every channel that is switched on. Never raises."""
+    try:
+        raise_alert(conn, level, title, detail, source, cfg=cfg, log_path=LOGS / "alerts.log")
+    except Exception as e:  # noqa: BLE001 - an alert must never stop the run that raised it
+        print(f"Note: could not record the alert ({type(e).__name__}: {e})")
+
+
+def _fetch_symbols(cfg):
+    """The watchlist plus every symbol a league bot trades, without repeats."""
+    from tradebot.league import league_symbols
+    return list(dict.fromkeys([*cfg["watchlist"], *cfg["paper_bot"]["symbols"], *league_symbols(cfg)]))
+
+
 def cmd_init(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
@@ -53,7 +72,7 @@ def cmd_init(cfg, args):
 def cmd_fetch(cfg, args):
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
-    symbols = args.symbols or cfg["watchlist"]
+    symbols = args.symbols or _fetch_symbols(cfg)
     full_start = cfg["start_date"]
     if args.source == "alpaca":
         _fetch_from_alpaca(conn, symbols, full_start)
@@ -432,6 +451,7 @@ def cmd_paper(cfg, args):
         # so only stop-loss exits pass. A big down day blocks adding risk, but
         # sells that reduce it still go through.
         stale = daily_loss = None
+        paused = db.is_paused(conn)
         expected = broker.last_completed_session()    # by the exchange's calendar, not this PC's
         try:
             check_data_fresh({s: db.last_price_date(conn, s) for s in pb["symbols"]}, expected)
@@ -465,6 +485,14 @@ def cmd_paper(cfg, args):
             say(f"Blocked: {daily_loss}")
             say("Sells and stop-loss exits still go through.")
             orders = [o for o in orders if o.side != "buy"]
+        if paused:
+            say("Paused (set from the dashboard or `python main.py pause`): no buys.")
+            say("Sells and stop-loss exits still go through. `python main.py resume` lifts it.")
+            orders = [o for o in orders if o.side != "buy"]
+        if args.execute and stale:
+            _alert(cfg, conn, "warning", "Paper bot did not trade: prices are out of date", stale, "paper")
+        elif args.execute and daily_loss:
+            _alert(cfg, conn, "warning", "Daily loss limit hit: no new buys today", daily_loss, "paper")
 
         # An order from an earlier run that hasn't filled yet (e.g. sent after
         # the close) is not in the positions, so the plan would repeat it.
@@ -476,7 +504,7 @@ def cmd_paper(cfg, args):
         orders.sort(key=lambda o: o.side == "buy")   # sells first, so buys never lean on margin
 
         if not orders:
-            say("No orders to send." if (stale or daily_loss or pending)
+            say("No orders to send." if (stale or daily_loss or pending or paused)
                 else "Portfolio already on target. No orders.")
             return
         say("Planned orders:")
@@ -508,6 +536,11 @@ def cmd_paper(cfg, args):
                 db.log_stop(conn, o.symbol,
                             db.last_price_date(conn, o.symbol) or expected or db.now_utc()[:10],
                             stops[o.symbol])
+                _alert(cfg, conn, "warning", f"Stop-loss: selling {o.symbol} ({stops[o.symbol]:+.1%})",
+                       f"{o.symbol} fell {stops[o.symbol]:+.1%} from its entry price (limit "
+                       f"{-stop_loss_pct(risk):+.1%}). The sell order was sent and fills at the next open. "
+                       f"The bot stays out of {o.symbol} for {risk['stop_cooldown_bars']} trading days.",
+                       "paper")
             say(f"  sent {side} {o.symbol} ${o.notional:,.2f}  (order {order_id})")
         say(f"Result: {len(orders) - len(failed)} of {len(orders)} orders sent.")
         if failed:
@@ -530,16 +563,102 @@ def cmd_daily(cfg, args):
     from tradebot.daily import daily_run
 
     secrets = load_secrets()
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
     try:
         broker = AlpacaBroker(secrets["alpaca_key"], secrets["alpaca_secret"], paper=secrets["alpaca_paper"])
         sessions = broker.trading_days()
     except Exception as e:  # noqa: BLE001 - recorded, then stop: without the calendar we can't know
+        problem = f"Could not read the exchange calendar ({type(e).__name__}: {e}); nothing was run."
+        _alert(cfg, conn, "error", "Daily run could not start", problem, "daily")
         with RunLog(LOGS / "daily_run.log", "daily run"):
-            sys.exit(f"Could not read the exchange calendar ({type(e).__name__}: {e}); nothing was run.")
+            sys.exit(problem)
     today = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
-    results = daily_run(ROOT, sessions, today)
+    results = daily_run(ROOT, sessions, today, conn=conn,
+                        alert=lambda level, title, detail: _alert(cfg, conn, level, title, detail, "daily"),
+                        summary=bool((cfg.get("alerts") or {}).get("daily_summary", True)))
     if any(code != 0 for _, code in results):
         sys.exit(1)
+
+
+def cmd_league(cfg, args):
+    """Replay every league bot from stored prices and print the leaderboard."""
+    from tradebot.league import run_league
+
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    with RunLog(LOGS / "league.log", "league") as say:
+        try:
+            board = run_league(conn, cfg, say)
+        except ValueError as e:
+            sys.exit(f"League settings problem: {e}")
+        if board.empty:
+            say("Nothing to show yet. Run `python main.py fetch` first.")
+            return
+        pct = lambda v, signed=True: "n/a" if v is None or pd.isna(v) else (f"{v:+.1%}" if signed else f"{v:.0%}")  # noqa: E731
+        num = lambda v: "n/a" if v is None or pd.isna(v) else f"{v:.2f}"  # noqa: E731
+        say(f"Prices up to {db.last_price_date(conn, cfg['benchmark'])}. Every bot started with "
+            f"${(cfg.get('league') or {}).get('start_cash', 100_000):,.0f}.")
+        say("LIVE = after the bot's settings were fixed (real evidence). "
+            "HISTORY = backtest before that (settings chosen with hindsight).")
+        say(f"{'bot':<20}{'symbols':>8}{'invested':>10}{'live days':>11}{'live':>9}{'SPY live':>10}"
+            f"{'hist/yr':>9}{'SPY/yr':>8}{'Sharpe':>8}{'worst drop':>12}{'trades':>8}")
+        for row in board.itertuples():
+            say(f"{row.bot:<20}{row.symbols:>8}{pct(row.invested, False):>10}{row.live_days:>11}"
+                f"{pct(row.live_return):>9}{pct(row.spy_live_return):>10}{pct(row.history_cagr):>9}"
+                f"{pct(row.spy_history_cagr):>8}{num(row.history_sharpe):>8}"
+                f"{pct(row.history_max_drawdown):>12}{row.trades:>8}")
+
+
+def cmd_pause(cfg, args):
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    pausing = args.cmd == "pause"
+    db.set_setting(conn, "paused", "1" if pausing else "0")
+    print("Paused: the paper bot will not buy. Sells and stop-loss exits still go through."
+          if pausing else "Resumed: the paper bot can buy again on its next run.")
+
+
+def cmd_alerts(cfg, args):
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    recent = db.alerts_df(conn, limit=args.limit)
+    if recent.empty:
+        print("No alerts so far.")
+        return
+    for row in recent.iloc[::-1].itertuples():
+        print(f"{row.ts[:16].replace('T', ' ')} UTC  {row.level.upper():<7} {row.title}"
+              f"   [sent to: {row.delivered or 'nowhere'}]")
+        for line in (row.detail or "").splitlines():
+            print(f"    {line}")
+        if row.failed:
+            print(f"    not sent: {row.failed}")
+
+
+def cmd_alert_test(cfg, args):
+    """Send a test alert through every channel that is switched on, and say what happened."""
+    from tradebot.alerts import configured_channels
+
+    load_secrets()                         # reads .env, where the phone channels are set
+    conn = db.connect(cfg["db_path"])
+    db.init_db(conn)
+    channels = configured_channels(cfg)
+    if not channels:
+        sys.exit("No alert channel is switched on. See the `alerts` section of README.md.")
+    print(f"Sending a test alert to: {', '.join(channels)}")
+    alert_id = raise_alert(conn, "info", "Trading assistant: test alert",
+                           "If you can read this, alerts work on this channel.", "test",
+                           cfg=cfg, log_path=LOGS / "alerts.log")
+    delivered, failed = conn.execute("SELECT delivered, failed FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    print(f"Delivered: {delivered or 'none'}")
+    if failed:
+        sys.exit(f"Not delivered: {failed}")
+
+
+def cmd_dashboard(cfg, args):
+    """Start the web dashboard and open it in the browser (Ctrl+C here stops it)."""
+    import subprocess
+    sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", str(ROOT / "dashboard.py")], cwd=ROOT))
 
 
 def cmd_report(cfg, args):
@@ -596,6 +715,12 @@ def build_parser():
     lt.add_argument("--followed-ai", choices=["yes", "no"])
     lt.add_argument("--notes")
     sub.add_parser("report")
+    sub.add_parser("league", help="replay every league bot from stored prices; print the leaderboard")
+    sub.add_parser("pause", help="stop the paper bot from buying (sells and stop-losses still run)")
+    sub.add_parser("resume", help="let the paper bot buy again")
+    al = sub.add_parser("alerts", help="show recent alerts"); al.add_argument("--limit", type=int, default=20)
+    sub.add_parser("alert-test", help="send a test alert through every channel that is switched on")
+    sub.add_parser("dashboard", help="start the web dashboard")
     sub.add_parser("daily", help="fetch, research and paper --execute in one go (for the scheduled task)")
     return p
 
@@ -607,6 +732,8 @@ COMMANDS = {
     "news-archive": cmd_news_archive, "news-test": cmd_news_test,
     "paper": cmd_paper, "daily": cmd_daily,
     "log-trade": cmd_log_trade, "report": cmd_report,
+    "league": cmd_league, "pause": cmd_pause, "resume": cmd_pause,
+    "alerts": cmd_alerts, "alert-test": cmd_alert_test, "dashboard": cmd_dashboard,
 }
 
 if __name__ == "__main__":

@@ -54,6 +54,44 @@ news_test:
   aliases: {UTX: RTX}          # old ticker -> today's, for news tagged before the rename
   archive_path: data/news_archive.db
 
+# Named lists of symbols, used by the league bots below.
+universes:
+  core: [SPY, QQQ, AAPL, MSFT, NVDA]
+  # 30 large US companies across every sector (the Dow 30 list as of late 2024).
+  large30: [AAPL, AMGN, AMZN, AXP, BA, CAT, CRM, CSCO, CVX, DIS, GS, HD, HON, IBM, JNJ,
+            JPM, KO, MCD, MMM, MRK, MSFT, NKE, NVDA, PG, SHW, TRV, UNH, V, VZ, WMT]
+  # 20 funds: US and foreign shares, bonds, gold, and the US sectors.
+  etfs: [SPY, QQQ, IWM, DIA, EFA, EEM, TLT, IEF, LQD, GLD,
+         XLK, XLF, XLE, XLV, XLY, XLP, XLI, XLU, XLB, XLRE]
+
+# The bot league: simulated bots that follow the paper bot's rules (decide after
+# the close, trade at the next open, same position cap, stop-loss and costs),
+# each with its own strategy and list of symbols. Fills are simulated from stored
+# prices, so no broker account is needed. `python main.py league` replays them.
+# Changing a bot's line restarts its live record. A bot may also set:
+#   params: {fast: 20}         strategy settings, in place of `strategies` above
+#   risk: {max_position_pct: 0.10}
+#   stop_loss: false
+league:
+  start_cash: 100000
+  history_start: "2016-01-04"   # prices start in 2015; the first year warms up the indicators
+  bots:
+    - {name: trend-core, strategy: sma_crossover, universe: core}     # the paper bot's twin
+    - {name: trend-large30, strategy: sma_crossover, universe: large30}
+    - {name: momentum-large30, strategy: momentum, universe: large30}
+    - {name: dip-large30, strategy: rsi_reversion, universe: large30}
+    - {name: calm-large30, strategy: vol_target, universe: large30}
+    - {name: trend-etfs, strategy: sma_crossover, universe: etfs}
+    - {name: momentum-etfs, strategy: momentum, universe: etfs}
+    - {name: hold-large30, strategy: buy_and_hold, universe: large30, stop_loss: false}   # baseline
+
+# Alerts: a failed daily run, a stop-loss, a day the bot refused to trade.
+# Every alert is kept in the database and logs/alerts.log. To also get them on a
+# phone, set NTFY_TOPIC or DISCORD_WEBHOOK_URL in .env (see .env.example).
+alerts:
+  desktop: true          # a Windows notification on this PC
+  daily_summary: true    # also send a short "all ok" after each good run, so silence means trouble
+
 # Hard limits enforced by the paper/live bot before any order is sent.
 risk:
   max_position_pct: 0.20       # no single symbol above 20% of equity

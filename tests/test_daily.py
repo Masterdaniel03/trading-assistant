@@ -14,10 +14,10 @@ def recorder(codes=None):
     return run, calls
 
 
-def test_a_normal_weekday_runs_fetch_research_paper_in_that_order(tmp_path):
+def test_a_normal_weekday_runs_fetch_research_paper_league_in_that_order(tmp_path):
     run, calls = recorder()
     results = daily_run(tmp_path, WEEK, "2026-11-11", run)
-    assert calls == ["fetch", "research", "paper"]
+    assert calls == ["fetch", "research", "paper", "league"]
     assert all(code == 0 for _, code in results)
     text = (tmp_path / "logs" / "daily_run.log").read_text(encoding="utf-8")
     assert "daily run for 2026-11-11" in text and "output of paper" in text and "all steps ok" in text
@@ -38,7 +38,7 @@ def test_weekends_and_holidays_do_nothing(tmp_path):
 def test_weekly_re_tests_run_on_the_last_trading_day_of_the_week(tmp_path):
     run, calls = recorder()
     daily_run(tmp_path, WEEK, "2026-11-13", run)                     # Friday
-    assert calls == ["fetch", "research", "paper", "news-archive", "walk-forward", "news-test"]
+    assert calls == ["fetch", "research", "paper", "league", "news-archive", "walk-forward", "news-test"]
     assert is_last_trading_day_of_week(["2026-11-25", "2026-11-26"], "2026-11-26")   # short week
     assert not is_last_trading_day_of_week(WEEK, "2026-11-12")
 
@@ -46,7 +46,8 @@ def test_weekly_re_tests_run_on_the_last_trading_day_of_the_week(tmp_path):
 def test_a_failed_step_does_not_stop_the_next_ones(tmp_path):
     run, calls = recorder({"fetch": 1, "research": 1})
     results = daily_run(tmp_path, WEEK, "2026-11-11", run)
-    assert calls == ["fetch", "research", "paper"]                   # paper's own guards decide
-    assert dict(results) == {"fetch prices": 1, "research notes (Gemini)": 1, "paper trading": 0}
+    assert calls == ["fetch", "research", "paper", "league"]         # paper's own guards decide
+    assert dict(results) == {"fetch prices": 1, "research notes (Gemini)": 1, "paper trading": 0,
+                             "bot league": 0}
     assert "problems in: fetch prices, research notes (Gemini)" in (
         tmp_path / "logs" / "daily_run.log").read_text(encoding="utf-8")
