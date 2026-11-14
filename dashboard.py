@@ -105,10 +105,10 @@ if len(compared):
     st.caption(f"Both start from {plain(money(compared['bot'].iloc[0], cents=False))} on "
                f"{compared['date'].iloc[0]:%b %d, %Y}, the day of the first order. "
                "SPY is bought at that day's close.")
-    st.altair_chart(comparison_chart(compared, mode), use_container_width=True)
+    st.altair_chart(comparison_chart(compared, mode), width="stretch")
     with st.expander("Show these numbers as a table"):
         st.dataframe(compared.rename(columns={"date": "Day", "bot": SERIES[0], "benchmark": SERIES[1]}),
-                     hide_index=True, use_container_width=True,
+                     hide_index=True, width="stretch",
                      column_config={"Day": st.column_config.DateColumn(format="MMM D, YYYY"),
                                     SERIES[0]: st.column_config.NumberColumn(format="$%.2f"),
                                     SERIES[1]: st.column_config.NumberColumn(format="$%.2f")})
@@ -138,7 +138,7 @@ with holdings_tab:
         st.dataframe(
             held[["symbol", "market_value", "share_of_account", "avg_entry_price", "unrealized_plpc",
                   "room_before_stop", "status"]],
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
             column_config={
                 "symbol": "Symbol",
                 "market_value": st.column_config.NumberColumn("Value", format="$%.2f"),
@@ -156,7 +156,7 @@ with holdings_tab:
     else:
         if len(waiting):
             st.caption(f"{len(waiting)} waiting to fill. Fill prices appear after the next refresh.")
-        st.dataframe(orders, hide_index=True, use_container_width=True, column_config={
+        st.dataframe(orders, hide_index=True, width="stretch", column_config={
             "ts": st.column_config.DatetimeColumn("Sent (UTC)", format="MMM D, HH:mm"),
             "symbol": "Symbol", "side": "Side",
             "notional": st.column_config.NumberColumn("Amount", format="$%.2f"),
@@ -169,7 +169,7 @@ with signals_tab:
     board = dd.signal_board(conn, bot["strategy"], cfg["watchlist"])
     st.markdown(f"**Latest view per symbol** (bot strategy: `{bot['strategy']}`)")
     st.caption("The research notes are advisory. The bot follows its strategy and does not trade on them.")
-    st.dataframe(board, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(board, hide_index=True, width="stretch", column_config={
         "symbol": "Symbol",
         "bot_target": st.column_config.NumberColumn("Bot target (0 to 1)", format="%.2f"),
         "bot_view": "Bot", "research_stance": "Research note",
@@ -188,11 +188,11 @@ with signals_tab:
                 "a note is scored against the closes after it was written.")
     else:
         st.caption("Average return after each kind of note, over the next 1, 5 and 20 trading days.")
-        st.dataframe(scores, hide_index=True, use_container_width=True, column_config={
+        st.dataframe(scores, hide_index=True, width="stretch", column_config={
             c: st.column_config.NumberColumn(format="percent") for c in scores if c.startswith("avg_return_")})
 
     with st.expander("Every research attempt, including rejected ones"):
-        st.dataframe(dd.research_log(conn), hide_index=True, use_container_width=True)
+        st.dataframe(dd.research_log(conn), hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------- your own trades
 with manual_tab:
@@ -212,11 +212,11 @@ with manual_tab:
             st.warning("No stored prices for: " + ", ".join(summary["unpriced"]) +
                        ". Run `python main.py fetch " + " ".join(summary["unpriced"]) + "` to value them.")
         if len(summary["by_choice"]):
-            st.dataframe(summary["by_choice"], hide_index=True, use_container_width=True, column_config={
+            st.dataframe(summary["by_choice"], hide_index=True, width="stretch", column_config={
                 "choice": "Decision", "trades": "Trades",
                 "profit": st.column_config.NumberColumn("Profit", format="$%.2f"),
                 "benchmark_profit": st.column_config.NumberColumn("Same dollars in SPY", format="$%.2f")})
-        st.dataframe(table, hide_index=True, use_container_width=True, column_config={
+        st.dataframe(table, hide_index=True, width="stretch", column_config={
             "date": "Day", "symbol": "Symbol", "side": "Side", "qty": "Shares",
             "price": st.column_config.NumberColumn("Your price", format="$%.2f"),
             "last_close": st.column_config.NumberColumn("Latest close", format="$%.2f"),
@@ -230,7 +230,7 @@ with tests_tab:
     walk = reports / "walk_forward_summary.csv"
     st.markdown("**Walk-forward test of the strategies** (settings picked on past years, scored on the next)")
     if walk.exists():
-        st.dataframe(pd.read_csv(walk), hide_index=True, use_container_width=True)
+        st.dataframe(pd.read_csv(walk), hide_index=True, width="stretch")
     else:
         st.info("Not run yet. Run `python main.py walk-forward`.")
     news = reports / "news_test_report.md"
