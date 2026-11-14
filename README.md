@@ -13,7 +13,11 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
                 │
           rebalance.py + risk.py ──► broker.py ──► Alpaca (paper)
                                                     
-  SQLite ──► dashboard_data.py ──► dashboard.py (Streamlit, read-only)
+  SQLite ──► league.py ──► simulated bots (same rules, own strategy and symbols each)
+
+  SQLite ──► dashboard_data.py ──► dashboard.py (Streamlit: charts, controls, run history)
+
+  daily.py ──► alerts.py ──► Windows notification / phone (ntfy, Discord) / logs/alerts.log
                                                     
   manual Fidelity trades ──► `log-trade` ──► trades table (followed_ai flag)
 
@@ -50,12 +54,16 @@ python main.py fetch
 | `python main.py news-test` | Walk-forward test: does past news predict the next session? → `reports/news_test_report.md` (see below) |
 | `python main.py paper` | Dry run: shows orders the bot would send |
 | `python main.py paper --execute` | Sends those orders to Alpaca paper. Every run, dry or not, is appended to `logs/paper_trading.log`; the next run records what each earlier order filled at |
-| `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade |
-| `streamlit run dashboard.py` | Open the dashboard in your browser (see below). Read-only: it never places an order |
+| `python main.py league` | Replay every league bot on the stored prices and print the leaderboard (see below) |
+| `python main.py pause` / `resume` | Stop the paper bot from buying, or let it buy again. Sells and stop-loss exits always go through |
+| `python main.py alerts` / `alert-test` | List recent alerts, or send a test alert through every channel that is switched on |
+| `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade (the dashboard has a form for this too) |
+| `python main.py dashboard` | Open the dashboard in your browser (see below) |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
 | `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, paper runs, research checks, DB) |
 
-Settings (watchlist, strategy parameters, risk limits) are in `config.yaml`.
+Settings (watchlist, strategy parameters, risk limits, league bots, alerts) are in `config.yaml`.
+With no symbols given, `fetch` downloads the watchlist plus every symbol a league bot trades.
 
 ## LLM research layer
 `python main.py research` gives the model (Gemini, set in `config.yaml`) two things per symbol: a few price facts computed from the stored closes, and up to 12 recent news items from Alpaca's news feed. It answers with a stance (bullish, neutral or bearish), a confidence, a short summary, its reasoning, risks, and the news items it relied on.
@@ -82,16 +90,46 @@ No prediction may use anything that was not yet known:
 
 The report includes the point-in-time audit, rank IC, a long-short return before and after costs, a shuffled-dates test, and a deliberately leaky version that shows what look-ahead would look like. All settings were fixed before the first run; changing them to improve the result would be its own form of look-ahead.
 
+## Bot league
+One paper account can only follow one strategy on a handful of stocks, which produces evidence slowly. The league runs several simulated bots side by side, each with its own strategy and list of symbols (`league.bots` and `universes` in `config.yaml`; eight bots across 52 symbols to start with).
+
+- **Same rules as the real bot.** Each bot decides after the close and trades at the next open, with the same position cap, order planner, stop-loss, cooldown and trading cost. Only the fills are simulated, from stored prices, so no extra broker accounts are needed.
+- **Live and history are kept apart.** The day a bot's settings are first seen is recorded. Days after it are the bot's **live** record: nothing was chosen knowing those prices. Days before it are **history**, an ordinary backtest. Changing a bot's line in the config restarts its live record.
+- **History flatters every bot.** The strategies were picked knowing the past, and the stock lists hold today's large companies, which are the ones that did well. The `hold-large30` bot (buy and hold the same 30 stocks) is the baseline to beat, not SPY.
+- Each run replays every bot from `league.history_start`, so a missed day changes nothing. `python main.py league` takes about 10 seconds and writes `logs/league.log`.
+
+Picking the bot with the best history and trusting it is the overfitting this project tries to avoid. Use the live column, and give it months.
+
+## Alerts
+The system tells you when something needs attention:
+
+| Alert | When |
+|---|---|
+| Daily run: problem in ... | A step of the scheduled run failed. The message names the step and its last lines of output |
+| Daily run could not start | The exchange calendar could not be read, so nothing ran |
+| No daily run finished on ... | The previous trading day has no finished run (the PC was off or signed out). Reported by the next run |
+| Stop-loss: selling ... | A position hit its stop and the sell order was sent |
+| Paper bot did not trade / Daily loss limit hit | A guard blocked trading for the day |
+| Daily run: all ok | After each good run (`alerts.daily_summary`), so that silence means trouble |
+
+Every alert is stored in the database, shown at the top of the dashboard until marked as read, and appended to `logs/alerts.log`. It is also sent as a Windows notification (`alerts.desktop`). To get alerts on a phone, install the free **ntfy** app, subscribe to a long random topic name, put the same name in `.env` as `NTFY_TOPIC`, and run `python main.py alert-test`. A Discord webhook (`DISCORD_WEBHOOK_URL`) works too. A channel that fails is recorded on the alert and never stops a run.
+
+An alert cannot be sent while the PC is off. The daily "all ok" message covers that: if it does not arrive, look.
+
 ## Dashboard
-`streamlit run dashboard.py` opens a local page with:
+`python main.py dashboard` opens a local page with:
+- **Controls (sidebar):** pause or resume buying; fetch prices; update the league; preview the bot's orders; and, after ticking a box, send the orders or start the full daily run. Each button runs the same `python main.py ...` command you could type, so the bot's limits, checks and logs apply.
+- **Unread alerts** at the top of the page, with a button to mark them as read.
+- **Bot league:** the leaderboard (live record first, then backtest history, each next to SPY), a chart of any bot against SPY and the other bots over the live period, 1 year, 3 years or all history, and that bot's holdings and latest trades.
+- **Runs and alerts:** every daily run with each step's result and output, and the list of alerts with where each was sent.
 - **Headline numbers:** account value, return since the first trade, SPY over the same days, the worst drop from a peak, and the Sharpe ratio (shown only after 20 trading days, because before that it is noise).
 - **Account value vs SPY buy and hold:** both lines start from the same dollar amount on the day of the first order, so they share one axis.
 - **Holdings and orders:** each holding's share of the account against its cap, its return since entry and how far it is from its stop-loss; every order with its status and fill price.
 - **Signals and research:** the bot's latest signal next to the latest research note for each symbol, whether they agree, and how past notes turned out.
-- **Your own trades:** manual trades valued at the latest close, next to what the same dollars would have made in SPY, split by whether you followed the AI.
+- **Your own trades:** a form to log a trade, and manual trades valued at the latest close, next to what the same dollars would have made in SPY, split by whether you followed the AI.
 - **Backtests:** the walk-forward summary and the news test report.
 
-The page reads the local database only. The broker-side numbers (balance, holdings, order results, daily account value) are refreshed by every `python main.py paper` run and by the page's **Refresh from Alpaca** button, which sends no orders. Prices and signals update when you run `fetch` and `paper`.
+Everything shown comes from the local database. The broker-side numbers (balance, holdings, order results, daily account value) are refreshed by every `python main.py paper` run and by the page's **Refresh from Alpaca** button, which sends no orders. Nothing is sent to the broker unless you tick the box under **Send orders**.
 
 ## Safety rails
 - Paper trading by default. Live trading raises an error unless `risk.allow_live: true` **and** `ALPACA_PAPER=false`.
@@ -103,10 +141,14 @@ The page reads the local database only. The broker-side numbers (balance, holdin
 - `fetch` stores finished daily bars only: today's stock bar is left out until 16:15 New York time, and today's crypto bar until the UTC day ends.
 - Positions in the paper account that aren't in `paper_bot.symbols` are closed (`paper_bot.close_unlisted`).
 - `paper` is a dry run unless you pass `--execute`.
+- `python main.py pause` (or the dashboard's Pause button) stops all buying until `resume`. Sells and stop-loss exits still go through.
+- The league bots are simulations. They never send an order to any broker.
 - Never commit `.env`. Never give any key withdrawal permissions.
 
 ## Daily routine (automatic)
-`python main.py daily` runs the whole day in one go: `fetch`, then `research`, then `paper --execute`. On the last trading day of each week it also updates the news archive and re-runs `walk-forward` and `news-test`. It skips weekends and market holidays (using Alpaca's calendar). Each step runs separately, so one failure doesn't stop the rest, and everything is appended to `logs/daily_run.log`.
+`python main.py daily` runs the whole day in one go: `fetch`, then `research`, then `paper --execute`, then `league`. On the last trading day of each week it also updates the news archive and re-runs `walk-forward` and `news-test`. It skips weekends and market holidays (using Alpaca's calendar). Each step runs separately, so one failure doesn't stop the rest. Everything is appended to `logs/daily_run.log`, each run is stored for the dashboard's run history, and a problem raises an alert.
+
+**Why 2:30 pm when the market opens at 6:30 am (Pacific)?** The strategies decide from daily closing prices, and the close is at 1:00 pm Pacific. The run happens after that, once the day's prices are final, and its orders wait at the broker and fill by themselves at the next open, 6:30 am. Running at 6:30 am instead would use the same closing prices, only 17 hours later.
 
 To run it automatically on weekdays at 2:30 pm (after the day's prices are final):
 ```powershell
@@ -123,6 +165,7 @@ The PC has to be on (or asleep, which Windows can wake it from). If it was off a
 - [ ] Phase 3b: earnings dates and filings as extra research inputs; decide from the scores whether the notes should influence the bot
 - [x] Phase 3c: point-in-time news test (walk-forward, headlines → next session)
 - [x] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
+- [x] Phase 4b: failure alerts, pause switch, bot league (8 simulated bots, 52 symbols), dashboard controls and run history
 - [ ] Phase 5: write-up of results (including what didn't work)
 
 ## Notes on honest evaluation

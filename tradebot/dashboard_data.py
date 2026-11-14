@@ -6,6 +6,7 @@ can be tested. The page (dashboard.py) only lays the results out.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -208,3 +209,103 @@ def health(conn, account: str, bot_symbols: list[str]) -> dict:
             "symbols_without_prices": sorted(s for s, d in price_dates.items() if not d),
             "research_notes": conn.execute("SELECT COUNT(*) FROM research WHERE status='ok'").fetchone()[0],
             "stops_fired": conn.execute("SELECT COUNT(*) FROM stop_events").fetchone()[0]}
+
+
+# ---------------------------------------------------------------- the bot league
+
+BENCHMARK_LABEL = "SPY buy and hold"
+PERIODS = {"Live only": None, "1 year": 365, "3 years": 3 * 365, "All history": 0}
+
+
+def league_curves(conn, benchmark: str, period: str = "All history",
+                  live_from: str | None = None) -> pd.DataFrame:
+    """Each bot's value, one column per bot plus the benchmark, over the chosen period.
+
+    Every column is rescaled to start the period at the same amount (the league's
+    starting cash), so the lines can be compared at a glance. "Live only" starts
+    on `live_from`. Returns a `date` column followed by one column per series.
+    """
+    from tradebot.league import equity_table
+    equity = equity_table(conn)
+    if equity.empty:
+        return pd.DataFrame()
+    days = PERIODS[period]
+    if days is None:
+        if not live_from:
+            return pd.DataFrame()
+        window = equity[equity.index >= pd.Timestamp(live_from)]
+    elif days:
+        window = equity[equity.index >= equity.index.max() - pd.Timedelta(days=days)]
+    else:
+        window = equity
+    window = window.dropna(how="all")
+    if len(window) < 2:
+        return pd.DataFrame()
+    base = float(equity.dropna(how="all").iloc[0].dropna().iloc[0])      # every bot starts with the same cash
+    spy = db.load_close(conn, benchmark).reindex(window.index).ffill()
+    out = window / window.bfill().iloc[0] * base
+    if spy.notna().any():
+        out[BENCHMARK_LABEL] = spy / spy.dropna().iloc[0] * base
+    return out.rename_axis("date").reset_index()
+
+
+def league_holdings(conn, bot: str) -> pd.DataFrame:
+    table = pd.read_sql_query(
+        "SELECT symbol, value, qty, entry_price, last_price FROM league_positions WHERE bot = ? "
+        "ORDER BY value DESC", conn, params=(bot,))
+    if table.empty:
+        return table
+    total = conn.execute("SELECT equity FROM league_equity WHERE bot = ? ORDER BY date DESC LIMIT 1",
+                         (bot,)).fetchone()
+    table["share_of_bot"] = table["value"] / total[0] if total else np.nan
+    table["return_since_entry"] = table["last_price"] / table["entry_price"] - 1
+    return table
+
+
+def league_trades(conn, bot: str, limit: int = 40) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT date, symbol, side, qty, price, notional, reason FROM league_trades WHERE bot = ? "
+        "ORDER BY date DESC, symbol LIMIT ?", conn, params=(bot, limit), parse_dates=["date"])
+
+
+# ---------------------------------------------------------------- runs and alerts
+
+def _local(ts: str | None) -> pd.Timestamp | None:
+    """A stored UTC time on this PC's clock, without the zone (for display)."""
+    if not isinstance(ts, str) or not ts:        # a missing value arrives as None or NaN
+        return None
+    stamp = pd.Timestamp(ts)
+    stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp
+    return stamp.tz_convert(datetime.now().astimezone().tzinfo).tz_localize(None)
+
+
+def run_history(conn, limit: int = 15) -> list[dict]:
+    """Recent unattended runs, newest first, each with its steps."""
+    runs = []
+    for row in db.runs_df(conn, limit).itertuples():
+        started, finished = _local(row.started), _local(row.finished)
+        steps = json.loads(row.steps) if isinstance(row.steps, str) else []
+        runs.append({"session": row.session, "status": row.status, "started": started,
+                     "minutes": (finished - started).total_seconds() / 60 if finished is not None else None,
+                     "steps": steps,
+                     "failed_steps": [s["name"] for s in steps if s["code"] != 0]})
+    return runs
+
+
+def run_in_progress(conn, max_hours: float = 2.0) -> bool:
+    """True if a daily run started recently and has not finished (so a second one should wait)."""
+    row = conn.execute("SELECT started FROM daily_runs WHERE status = 'running' ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return False
+    age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(row[0])
+    return age < pd.Timedelta(hours=max_hours)
+
+
+def alerts_table(conn, limit: int = 50) -> pd.DataFrame:
+    table = db.alerts_df(conn, limit=limit)
+    if table.empty:
+        return table
+    table["when"] = table["ts"].map(_local)
+    table["new"] = table["read"] == 0
+    return table[["when", "level", "title", "detail", "delivered", "failed", "new"]]
+

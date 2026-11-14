@@ -1,14 +1,19 @@
-"""The dashboard: paper bot vs SPY, holdings, orders, signals, research notes, your own trades.
+"""The dashboard: paper bot vs SPY, the bot league, holdings, orders, signals,
+research notes, your own trades, run history and alerts.
 
-    streamlit run dashboard.py
+    python main.py dashboard        (or: streamlit run dashboard.py)
 
-It reads the local database only and never places an order. The numbers that
-come from the broker are refreshed by every `python main.py paper` run, or by
-the "Refresh from Alpaca" button here (which also sends no orders).
+Everything shown comes from the local database. The sidebar holds the controls:
+pause or resume buying, fetch prices, update the league, preview the bot's
+orders, and (after ticking a box) send them or start the full daily run.
+Every button runs the same `python main.py ...` command you could type, so the
+bot's guards and logs apply exactly as they do in a scheduled run.
 """
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -17,7 +22,8 @@ import streamlit as st
 from tradebot import dashboard_data as dd
 from tradebot import db
 from tradebot.config import ROOT, load_config, load_secrets
-from tradebot.dashboard_charts import SERIES, comparison_chart
+from tradebot.daily import Step, run_step
+from tradebot.dashboard_charts import SERIES, comparison_chart, league_chart
 
 def money(value, cents: bool = True) -> str:
     if value is None or pd.isna(value):
@@ -34,6 +40,20 @@ def percent(value, signed: bool = True) -> str:
 def plain(text: str) -> str:
     """Streamlit reads $...$ as maths. Escape dollar signs in text we did not write."""
     return text.replace("$", "\\$")
+
+
+def run_command(label: str, args: list[str]) -> None:
+    """Run `python main.py <args>`, wait for it, and keep its output to show on the page."""
+    with st.spinner(f"{label}..."):
+        code, output = run_step(ROOT, Step(label, args), timeout_s=900)
+    st.session_state["last_action"] = {"label": label, "code": code, "output": output}
+
+
+def start_daily_run() -> None:
+    """Start the full daily run in the background; it records itself under Runs and alerts."""
+    subprocess.Popen([sys.executable, str(ROOT / "main.py"), "daily"], cwd=ROOT,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def theme_mode() -> str:
@@ -55,6 +75,43 @@ risk, bot = cfg["risk"], cfg["paper_bot"]
 mode = theme_mode()
 
 with st.sidebar:
+    st.subheader("Paper bot")
+    paused = db.is_paused(conn)
+    if paused:
+        st.warning("Buying is paused. Sells and stop-loss exits still go through.")
+        if st.button("Resume buying"):
+            db.set_setting(conn, "paused", "0")
+            st.rerun()
+    else:
+        st.caption("Buying is on. The bot trades on its next run.")
+        if st.button("Pause buying", help="The bot stops buying until you resume. "
+                                          "Sells and stop-loss exits still go through."):
+            db.set_setting(conn, "paused", "1")
+            st.rerun()
+
+    st.subheader("Run something now")
+    if st.button("Fetch prices", help="Downloads the latest daily prices for every symbol. About a minute."):
+        run_command("Fetch prices", ["fetch"])
+    if st.button("Update the league", help="Replays every league bot on the stored prices. About 10 seconds."):
+        run_command("Update the league", ["league"])
+    if st.button("Preview the bot's orders", help="Shows what the paper bot would do. Sends nothing."):
+        run_command("Preview the bot's orders", ["paper"])
+    with st.expander("Send orders"):
+        st.caption("These send orders to the Alpaca paper account. The bot's limits and checks still apply.")
+        sure = st.checkbox("Yes, send paper orders")
+        if st.button("Send the bot's orders now", disabled=not sure):
+            run_command("Send the bot's orders", ["paper", "--execute"])
+        busy = dd.run_in_progress(conn)
+        if st.button("Start the full daily run", disabled=not sure or busy,
+                     help="Fetch, research notes, paper orders and the league, as the scheduled task does. "
+                          "Runs in the background for a few minutes; see Runs and alerts."):
+            start_daily_run()
+            st.session_state["last_action"] = {
+                "label": "Start the full daily run", "code": 0,
+                "output": "Started in the background. It appears under Runs and alerts when it finishes."}
+        if busy:
+            st.caption("A daily run is in progress.")
+
     st.subheader("Data")
     if st.button("Refresh from Alpaca", help="Updates the balance, holdings and order results. Sends no orders."):
         try:
@@ -71,11 +128,34 @@ with st.sidebar:
     st.caption(f"Prices stored up to: {state['oldest_price_date'] or 'none'}")
     if state["symbols_without_prices"]:
         st.warning("No prices for: " + ", ".join(state["symbols_without_prices"]))
-    st.caption("Prices and signals update when you run `python main.py fetch` and `python main.py paper`.")
+    st.caption("The scheduled run updates everything on weekdays at 2:30 pm. "
+               "The buttons above do the same by hand.")
 
 st.title("Trading assistant")
 st.caption(f"{'Paper' if secrets['alpaca_paper'] else 'LIVE'} account, strategy `{bot['strategy']}`. "
-           "This page only reads data. It never places an order.")
+           "Nothing is sent to the broker unless you use Send orders in the sidebar.")
+
+# ---- what the last button did
+action = st.session_state.get("last_action")
+if action:
+    with st.expander(f"{action['label']}: {'done' if action['code'] == 0 else 'FAILED'}", expanded=True):
+        st.code(action["output"] or "(no output)", language=None)
+        if st.button("Close"):
+            del st.session_state["last_action"]
+            st.rerun()
+
+# ---- alerts nobody has read yet
+unread = db.alerts_df(conn, unread_only=True)
+problems = unread[unread["level"].isin(["error", "warning"])]
+if len(problems):
+    for row in problems.head(5).itertuples():
+        show = st.error if row.level == "error" else st.warning
+        show(plain(f"{row.title}" + (f"\n\n{row.detail}" if row.detail else "")))
+    if len(problems) > 5:
+        st.caption(f"and {len(problems) - 5} more under Runs and alerts.")
+    if st.button("Mark alerts as read"):
+        db.mark_alerts_read(conn)
+        st.rerun()
 
 snapshot = dd.latest_snapshot(conn, account)
 equity = dd.equity_series(conn, account)
@@ -119,8 +199,9 @@ else:
             "days of account history and SPY prices from that day on. Run `python main.py fetch`, then "
             "use Refresh in the sidebar.")
 
-holdings_tab, signals_tab, manual_tab, tests_tab = st.tabs(
-    ["Holdings and orders", "Signals and research", "Your own trades", "Backtests"])
+holdings_tab, league_tab, signals_tab, manual_tab, tests_tab, runs_tab = st.tabs(
+    ["Holdings and orders", "Bot league", "Signals and research", "Your own trades", "Backtests",
+     "Runs and alerts"])
 
 # ---------------------------------------------------------------- holdings and orders
 with holdings_tab:
@@ -164,6 +245,80 @@ with holdings_tab:
             "price": st.column_config.NumberColumn("Fill price", format="$%.2f"),
             "status": "Status", "notes": "Notes"})
 
+# ---------------------------------------------------------------- the bot league
+with league_tab:
+    from tradebot import league as league_mod
+    board = league_mod.leaderboard(conn, cfg)
+    if board.empty:
+        st.info("The league has not been run yet. Press Update the league in the sidebar "
+                "(or run `python main.py league`).")
+    else:
+        st.caption("Simulated bots that follow the paper bot's rules, each with its own strategy and list of "
+                   "symbols. Each started with the same cash. **Live** counts only the days after a bot's "
+                   "settings were fixed, so it is real evidence. **History** is a backtest: the strategies "
+                   "and the symbols were chosen knowing those prices, so it flatters every bot.")
+        st.dataframe(
+            board[["bot", "strategy", "symbols", "value", "invested", "live_days", "live_return",
+                   "spy_live_return", "history_cagr", "spy_history_cagr", "history_sharpe",
+                   "history_max_drawdown", "trades"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "bot": "Bot", "strategy": "Strategy", "symbols": "Symbols",
+                "value": st.column_config.NumberColumn("Value now", format="$%.0f"),
+                "invested": st.column_config.ProgressColumn("Invested", format="percent", min_value=0, max_value=1),
+                "live_days": st.column_config.NumberColumn("Live days", help="Trading days since the settings were fixed."),
+                "live_return": st.column_config.NumberColumn("Live return", format="percent"),
+                "spy_live_return": st.column_config.NumberColumn("SPY, same days", format="percent"),
+                "history_cagr": st.column_config.NumberColumn("History, per year", format="percent"),
+                "spy_history_cagr": st.column_config.NumberColumn("SPY, per year", format="percent"),
+                "history_sharpe": st.column_config.NumberColumn("History Sharpe", format="%.2f"),
+                "history_max_drawdown": st.column_config.NumberColumn("Worst drop", format="percent"),
+                "trades": "Trades"})
+
+        pick, span = st.columns([1, 2])
+        chosen = pick.selectbox("Bot to look at", list(board["bot"]))
+        period = span.radio("Period", list(dd.PERIODS), index=len(dd.PERIODS) - 1, horizontal=True)
+        row = board.set_index("bot").loc[chosen]
+        live_from = pd.Timestamp(row["live_since"])
+        curves = dd.league_curves(conn, cfg["benchmark"], period, row["live_since"])
+        if curves.empty:
+            st.info(f"`{chosen}` has no live days yet. Its live record starts with the first trading day "
+                    f"after {live_from:%b %d, %Y}. Choose another period to see the backtest history.")
+        else:
+            st.caption(f"Every line starts the period at {plain(money(curves[chosen].iloc[0], cents=False))}. "
+                       f"`{chosen}` is in blue, SPY in orange, the other bots in grey.")
+            st.altair_chart(league_chart(curves, chosen, mode, dd.BENCHMARK_LABEL, live_from), width="stretch")
+            with st.expander("Show these numbers as a table"):
+                st.dataframe(curves, hide_index=True, width="stretch", column_config={
+                    "date": st.column_config.DateColumn("Day", format="MMM D, YYYY"),
+                    **{c: st.column_config.NumberColumn(format="$%.0f") for c in curves.columns if c != "date"}})
+
+        left, right = st.columns(2)
+        left.markdown(f"**What `{chosen}` holds**")
+        holdings = dd.league_holdings(conn, chosen)
+        if holdings.empty:
+            left.info("Nothing. It is all in cash.")
+        else:
+            left.dataframe(holdings[["symbol", "value", "share_of_bot", "entry_price", "last_price",
+                                     "return_since_entry"]],
+                           hide_index=True, width="stretch", column_config={
+                "symbol": "Symbol", "value": st.column_config.NumberColumn("Value", format="$%.0f"),
+                "share_of_bot": st.column_config.NumberColumn("Share of bot", format="percent"),
+                "entry_price": st.column_config.NumberColumn("Entry price", format="$%.2f"),
+                "last_price": st.column_config.NumberColumn("Latest close", format="$%.2f"),
+                "return_since_entry": st.column_config.NumberColumn("Return since entry", format="percent")})
+        right.markdown(f"**Latest trades by `{chosen}`**")
+        recent = dd.league_trades(conn, chosen)
+        if recent.empty:
+            right.info("No trades yet.")
+        else:
+            right.dataframe(recent, hide_index=True, width="stretch", column_config={
+                "date": st.column_config.DateColumn("Day", format="MMM D, YYYY"),
+                "symbol": "Symbol", "side": "Side",
+                "qty": st.column_config.NumberColumn("Shares", format="%.2f"),
+                "price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                "notional": st.column_config.NumberColumn("Amount", format="$%.0f"), "reason": "Why"})
+
 # ---------------------------------------------------------------- signals and research
 with signals_tab:
     board = dd.signal_board(conn, bot["strategy"], cfg["watchlist"])
@@ -196,6 +351,25 @@ with signals_tab:
 
 # ---------------------------------------------------------------- your own trades
 with manual_tab:
+    with st.expander("Log a trade you made yourself"):
+        with st.form("log_trade", clear_on_submit=True):
+            first, second, third, fourth = st.columns(4)
+            side = first.selectbox("Side", ["buy", "sell"])
+            symbol = second.text_input("Symbol", placeholder="AAPL")
+            qty = third.number_input("Shares", min_value=0.0, step=1.0, format="%.4f")
+            price = fourth.number_input("Price per share", min_value=0.0, step=0.01, format="%.2f")
+            fifth, sixth = st.columns([1, 3])
+            fees = fifth.number_input("Fees", min_value=0.0, step=0.01, format="%.2f")
+            followed = sixth.radio("Did you follow the AI signal?", ["yes", "no", "not sure"], horizontal=True)
+            notes = st.text_input("Notes (optional)")
+            if st.form_submit_button("Save trade"):
+                if not symbol.strip() or qty <= 0 or price <= 0:
+                    st.error("Fill in the symbol, the number of shares and the price.")
+                else:
+                    db.log_trade(conn, "fidelity_manual", symbol.strip(), side, qty=qty, price=price,
+                                 notional=qty * price, fees=fees, notes=notes or None,
+                                 followed_ai={"yes": 1, "no": 0}.get(followed))
+                    st.success(f"Saved: {side} {qty:g} {symbol.strip().upper()} at {plain(money(price))}.")
     table, summary = dd.manual_review(conn, benchmark=cfg["benchmark"])
     if table.empty:
         st.info("No manual trades logged yet. Record one with, for example: "
@@ -240,5 +414,40 @@ with tests_tab:
             st.markdown(plain(news.read_text(encoding="utf-8")))
     else:
         st.info("Not run yet. Run `python main.py news-archive`, then `python main.py news-test`.")
+
+# ---------------------------------------------------------------- runs and alerts
+with runs_tab:
+    st.markdown("**Daily runs**")
+    runs = dd.run_history(conn)
+    if not runs:
+        st.info("No daily run has been recorded yet. The scheduled task runs on weekdays at 2:30 pm; "
+                "each run then appears here with its steps.")
+    for run in runs:
+        when = f"{run['started']:%a %b %d, %H:%M}" if run["started"] is not None else "?"
+        took = f", {run['minutes']:.0f} min" if run["minutes"] is not None else ""
+        outcome = {"ok": "all steps ok", "running": "did not finish (or still running)"}.get(
+            run["status"], "PROBLEM in " + ", ".join(run["failed_steps"]))
+        with st.expander(f"{when}{took}: {outcome}", expanded=run["status"] == "failed" and run is runs[0]):
+            if not run["steps"]:
+                st.caption("No step results were stored for this run.")
+            for step in run["steps"]:
+                result = "ok" if step["code"] == 0 else f"FAILED (exit code {step['code']})"
+                st.markdown(f"**{step['name']}**: {result}, {step['seconds']:.0f} s")
+                st.code(step["output"] or "(no output)", language=None)
+
+    st.markdown("**Alerts**")
+    alerts = dd.alerts_table(conn)
+    if alerts.empty:
+        st.info("No alerts so far. A failed run, a stop-loss sale or a day the bot refused to trade "
+                "would be listed here.")
+    else:
+        st.dataframe(alerts, hide_index=True, width="stretch", column_config={
+            "when": st.column_config.DatetimeColumn("When (this PC's time)", format="MMM D, HH:mm"),
+            "level": "Level", "title": "What happened",
+            "detail": st.column_config.TextColumn("Details", width="large"),
+            "delivered": "Sent to", "failed": "Not sent",
+            "new": st.column_config.CheckboxColumn("Unread")})
+    st.caption("Alerts also go to this PC's notifications and logs/alerts.log. For phone alerts, set "
+               "NTFY_TOPIC in .env, then test with `python main.py alert-test`.")
 
 conn.close()
