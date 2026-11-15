@@ -92,7 +92,7 @@ with st.sidebar:
     st.subheader("Run something now")
     if st.button("Fetch prices", help="Downloads the latest daily prices for every symbol. About a minute."):
         run_command("Fetch prices", ["fetch"])
-    if st.button("Update the league", help="Replays every league bot on the stored prices. About 10 seconds."):
+    if st.button("Update the league", help="Replays every league bot on the stored prices. Under a minute."):
         run_command("Update the league", ["league"])
     if st.button("Preview the bot's orders", help="Shows what the paper bot would do. Sends nothing."):
         run_command("Preview the bot's orders", ["paper"])
@@ -150,7 +150,10 @@ problems = unread[unread["level"].isin(["error", "warning"])]
 if len(problems):
     for row in problems.head(5).itertuples():
         show = st.error if row.level == "error" else st.warning
-        show(plain(f"{row.title}" + (f"\n\n{row.detail}" if row.detail else "")))
+        if row.detail:
+            show(plain(row.detail), title=plain(row.title))
+        else:
+            show(plain(row.title))
     if len(problems) > 5:
         st.caption(f"and {len(problems) - 5} more under Runs and alerts.")
     if st.button("Mark alerts as read"):
@@ -185,7 +188,8 @@ if len(compared):
     st.caption(f"Both start from {plain(money(compared['bot'].iloc[0], cents=False))} on "
                f"{compared['date'].iloc[0]:%b %d, %Y}, the day of the first order. "
                "SPY is bought at that day's close.")
-    st.altair_chart(comparison_chart(compared, mode), width="stretch")
+    st.altair_chart(comparison_chart(compared, mode), width="stretch",
+                    alt="Line chart of the paper account's value against SPY buy and hold")
     with st.expander("Show these numbers as a table"):
         st.dataframe(compared.rename(columns={"date": "Day", "bot": SERIES[0], "benchmark": SERIES[1]}),
                      hide_index=True, width="stretch",
@@ -256,14 +260,17 @@ with league_tab:
         st.caption("Simulated bots that follow the paper bot's rules, each with its own strategy and list of "
                    "symbols. Each started with the same cash. **Live** counts only the days after a bot's "
                    "settings were fixed, so it is real evidence. **History** is a backtest: the strategies "
-                   "and the symbols were chosen knowing those prices, so it flatters every bot.")
+                   "and the symbols were chosen knowing those prices, so it flatters every bot. The `rank-` bots "
+                   "hold the 25 stocks the ranking model scores highest; `hold-sp500` holds all of that list "
+                   "and is the baseline they have to beat.")
         st.dataframe(
-            board[["bot", "strategy", "symbols", "value", "invested", "live_days", "live_return",
+            board[["bot", "strategy", "symbols", "since", "value", "invested", "live_days", "live_return",
                    "spy_live_return", "history_cagr", "spy_history_cagr", "history_sharpe",
                    "history_max_drawdown", "trades"]],
             hide_index=True, width="stretch",
             column_config={
                 "bot": "Bot", "strategy": "Strategy", "symbols": "Symbols",
+                "since": st.column_config.DateColumn("Replayed from", format="MMM YYYY"),
                 "value": st.column_config.NumberColumn("Value now", format="$%.0f"),
                 "invested": st.column_config.ProgressColumn("Invested", format="percent", min_value=0, max_value=1),
                 "live_days": st.column_config.NumberColumn("Live days", help="Trading days since the settings were fixed."),
@@ -276,18 +283,21 @@ with league_tab:
                 "trades": "Trades"})
 
         pick, span = st.columns([1, 2])
-        chosen = pick.selectbox("Bot to look at", list(board["bot"]))
-        period = span.radio("Period", list(dd.PERIODS), index=len(dd.PERIODS) - 1, horizontal=True)
+        chosen = pick.selectbox("Bot to look at", list(board["bot"]), key="league_bot")
+        period = span.segmented_control("Period", list(dd.PERIODS), default="All history", required=True,
+                                        key="league_period")
         row = board.set_index("bot").loc[chosen]
         live_from = pd.Timestamp(row["live_since"])
-        curves = dd.league_curves(conn, cfg["benchmark"], period, row["live_since"])
+        curves = dd.league_curves(conn, cfg["benchmark"], period, row["live_since"], chosen)
         if curves.empty:
             st.info(f"`{chosen}` has no live days yet. Its live record starts with the first trading day "
                     f"after {live_from:%b %d, %Y}. Choose another period to see the backtest history.")
         else:
-            st.caption(f"Every line starts the period at {plain(money(curves[chosen].iloc[0], cents=False))}. "
-                       f"`{chosen}` is in blue, SPY in orange, the other bots in grey.")
-            st.altair_chart(league_chart(curves, chosen, mode, dd.BENCHMARK_LABEL, live_from), width="stretch")
+            st.caption(f"Every line starts at {plain(money(curves[chosen].iloc[0], cents=False))} on "
+                       f"{curves['date'].iloc[0]:%b %d, %Y}. `{chosen}` is in blue, SPY in orange, the other "
+                       "bots in grey. A bot that had not started by that day is not drawn.")
+            st.altair_chart(league_chart(curves, chosen, mode, dd.BENCHMARK_LABEL, live_from), width="stretch",
+                            alt=f"Line chart of the value of {chosen} against SPY and the other league bots")
             with st.expander("Show these numbers as a table"):
                 st.dataframe(curves, hide_index=True, width="stretch", column_config={
                     "date": st.column_config.DateColumn("Day", format="MMM D, YYYY"),
@@ -360,7 +370,8 @@ with manual_tab:
             price = fourth.number_input("Price per share", min_value=0.0, step=0.01, format="%.2f")
             fifth, sixth = st.columns([1, 3])
             fees = fifth.number_input("Fees", min_value=0.0, step=0.01, format="%.2f")
-            followed = sixth.radio("Did you follow the AI signal?", ["yes", "no", "not sure"], horizontal=True)
+            followed = sixth.segmented_control("Did you follow the AI signal?", ["yes", "no", "not sure"],
+                                               default="yes", required=True)
             notes = st.text_input("Notes (optional)")
             if st.form_submit_button("Save trade"):
                 if not symbol.strip() or qty <= 0 or price <= 0:
@@ -407,6 +418,13 @@ with tests_tab:
         st.dataframe(pd.read_csv(walk), hide_index=True, width="stretch")
     else:
         st.info("Not run yet. Run `python main.py walk-forward`.")
+    ranking = reports / "model_test_report.md"
+    st.markdown("**Ranking model test** (can price and volume history rank next week's winners?)")
+    if ranking.exists():
+        with st.expander("Show the full report"):
+            st.markdown(plain(ranking.read_text(encoding="utf-8")))
+    else:
+        st.info("Not run yet. Run `python main.py model-fetch`, then `python main.py model-test`.")
     news = reports / "news_test_report.md"
     st.markdown("**News test** (do headlines predict the next session?)")
     if news.exists():

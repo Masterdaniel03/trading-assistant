@@ -13,6 +13,9 @@
     python main.py news-test                 # does past news predict the next session? (walk-forward)
     python main.py paper                     # dry run: show orders the bot WOULD place
     python main.py paper --execute           # actually send them to Alpaca paper
+    python main.py model-fetch               # prices for the ranking model's wide universe (Alpaca)
+    python main.py model-score               # score every stock for the days not scored yet
+    python main.py model-test                # walk-forward test of the ranking model, with a report
     python main.py league                    # replay every league bot and print the leaderboard
     python main.py pause | resume            # stop the paper bot from buying / let it buy again
     python main.py alerts                    # recent alerts; `alert-test` sends a test one
@@ -581,6 +584,96 @@ def cmd_daily(cfg, args):
         sys.exit(1)
 
 
+def _model_setup(cfg):
+    model = cfg.get("model")
+    if not model:
+        sys.exit("config.yaml has no `model` section.")
+    conn = db.connect(model["prices_path"])
+    db.init_db(conn)
+    return model, conn
+
+
+def _model_dataset(model, conn, say):
+    from tradebot import modeldata, rankmodel
+    panels, breaks = modeldata.load_clean_panels(conn, model.get("break_ratio"))
+    if not panels:
+        sys.exit("No prices for the model yet. Run: python main.py model-fetch")
+    data = rankmodel.build_dataset(panels, int(model["horizon_days"]))
+    say(f"{len(data.symbols)} stocks, {len(data.days):,} days of prices, "
+        f"{data.days[0]:%Y-%m-%d} to {data.days[-1]:%Y-%m-%d}. "
+        f"{len(breaks)} series end early at a data break.")
+    return panels, data, breaks
+
+
+def cmd_model_fetch(cfg, args):
+    """Download or refresh the wide universe's prices from Alpaca (their own database)."""
+    from tradebot import modeldata
+
+    model, conn = _model_setup(cfg)
+    secrets = load_secrets()
+    if not secrets["alpaca_key"] or not secrets["alpaca_secret"]:
+        sys.exit("model-fetch needs ALPACA_API_KEY / ALPACA_SECRET_KEY in .env")
+    with RunLog(LOGS / "model.log", "model-fetch") as say:
+        def fetch(symbols, start):
+            return modeldata.fetch_bars(symbols, start, secrets["alpaca_key"], secrets["alpaca_secret"],
+                                        model.get("asof"))
+        modeldata.update_prices(conn, cfg["universes"][model["universe"]], model["start"], model.get("asof"),
+                                fetch, say, full=args.full)
+
+
+def _clear_scores(conn, say):
+    import shutil
+    conn.execute("DELETE FROM model_scores")
+    conn.commit()
+    shutil.rmtree(ROOT / "data" / "models", ignore_errors=True)
+    say("Stored scores and saved models were deleted; everything is computed again.")
+
+
+def cmd_model_score(cfg, args):
+    """Score every stock for each day from model.first_test_year on that has no score yet."""
+    from tradebot import rankmodel
+
+    model, conn = _model_setup(cfg)
+    with RunLog(LOGS / "model.log", "model-score") as say:
+        if args.rebuild:
+            _clear_scores(conn, say)
+        _, data, _ = _model_dataset(model, conn, say)
+        added = rankmodel.update_scores(conn, data, model, ROOT / "data" / "models", say)
+        say("New scores: " + ", ".join(f"{name} {count:,}" for name, count in added.items()) +
+            f". Scored up to {data.days[-1]:%Y-%m-%d}.")
+
+
+def cmd_model_test(cfg, args):
+    """Walk-forward test of the ranking model. Research only: nothing here trades."""
+    from tradebot import rankmodel
+
+    model, conn = _model_setup(cfg)
+    with RunLog(LOGS / "model.log", "model-test") as say:
+        if args.rebuild:
+            _clear_scores(conn, say)
+        panels, data, breaks = _model_dataset(model, conn, say)
+        rankmodel.update_scores(conn, data, model, ROOT / "data" / "models", say)
+        plan = rankmodel.folds(data, int(model["first_test_year"]))
+        if not plan:
+            sys.exit("Not enough history before model.first_test_year to train a model.")
+        test_days = data.days[data.days.year >= int(model["first_test_year"])]
+        top_n, cost_bps = int(model.get("top_n", 25)), float(cfg["backtest"]["cost_bps"])
+        results = {name: rankmodel.evaluate(rankmodel.load_scores(conn, name), data, top_n, cost_bps)
+                   for name in model["models"]}
+        last = panels["close"].apply(lambda column: column.last_valid_index())
+        info = {"symbols": len(data.symbols), "ended": int((last < data.days[-1]).sum()),
+                "first_bar": f"{data.days[0]:%Y-%m-%d}", "last_bar": f"{data.days[-1]:%Y-%m-%d}",
+                "horizon": data.horizon, "top_n": top_n, "cost_bps": cost_bps,
+                "break_ratio": model.get("break_ratio"), "breaks": breaks}
+        report = rankmodel.render(results, rankmodel.single_inputs(data, test_days),
+                                  rankmodel.look_ahead_example(panels, data, test_days), plan, info)
+    print(report)
+    REPORTS.mkdir(exist_ok=True)
+    path = REPORTS / "model_test_report.md"
+    path.write_text(report + "\n", encoding="utf-8")
+    print(f"\nSaved {path}")
+
+
 def cmd_league(cfg, args):
     """Replay every league bot from stored prices and print the leaderboard."""
     from tradebot.league import run_league
@@ -716,6 +809,13 @@ def build_parser():
     lt.add_argument("--notes")
     sub.add_parser("report")
     sub.add_parser("league", help="replay every league bot from stored prices; print the leaderboard")
+    mf = sub.add_parser("model-fetch", help="download or refresh the ranking model's prices (Alpaca)")
+    mf.add_argument("--full", action="store_true", help="download the whole history again")
+    for name, text in (("model-score", "score every stock for the days not scored yet"),
+                       ("model-test", "walk-forward test of the ranking model, with a report")):
+        mp = sub.add_parser(name, help=text)
+        mp.add_argument("--rebuild", action="store_true",
+                        help="delete stored scores and saved models first (needed after changing model settings)")
     sub.add_parser("pause", help="stop the paper bot from buying (sells and stop-losses still run)")
     sub.add_parser("resume", help="let the paper bot buy again")
     al = sub.add_parser("alerts", help="show recent alerts"); al.add_argument("--limit", type=int, default=20)
@@ -733,6 +833,7 @@ COMMANDS = {
     "paper": cmd_paper, "daily": cmd_daily,
     "log-trade": cmd_log_trade, "report": cmd_report,
     "league": cmd_league, "pause": cmd_pause, "resume": cmd_pause,
+    "model-fetch": cmd_model_fetch, "model-score": cmd_model_score, "model-test": cmd_model_test,
     "alerts": cmd_alerts, "alert-test": cmd_alert_test, "dashboard": cmd_dashboard,
 }
 

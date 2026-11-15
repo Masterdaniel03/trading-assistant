@@ -1,4 +1,4 @@
-"""The unattended daily run: fetch -> research -> paper --execute, plus a weekly re-test.
+"""The unattended daily run: fetch -> research -> paper --execute -> model -> league, plus weekly re-tests.
 
 Started by Windows Task Scheduler (see scripts/install_schedule.ps1), or by
 hand with `python main.py daily`. Each step runs as its own process, so one
@@ -43,10 +43,13 @@ DAILY = [
     Step("fetch prices", ["fetch"]),
     Step("research notes (Gemini)", ["research"]),
     Step("paper trading", ["paper", "--execute"]),
+    Step("model prices", ["model-fetch"]),
+    Step("model scores", ["model-score"]),
     Step("bot league", ["league"]),
     Step("update the news archive", ["news-archive"], weekly=True),
     Step("walk-forward re-test", ["walk-forward"], weekly=True),
     Step("news test", ["news-test"], weekly=True),
+    Step("ranking model test", ["model-test"], weekly=True),
 ]
 
 

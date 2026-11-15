@@ -218,12 +218,15 @@ PERIODS = {"Live only": None, "1 year": 365, "3 years": 3 * 365, "All history": 
 
 
 def league_curves(conn, benchmark: str, period: str = "All history",
-                  live_from: str | None = None) -> pd.DataFrame:
+                  live_from: str | None = None, selected: str | None = None) -> pd.DataFrame:
     """Each bot's value, one column per bot plus the benchmark, over the chosen period.
 
     Every column is rescaled to start the period at the same amount (the league's
     starting cash), so the lines can be compared at a glance. "Live only" starts
-    on `live_from`. Returns a `date` column followed by one column per series.
+    on `live_from`. Bots do not all start on the same day: the period begins no
+    earlier than the `selected` bot does, and a bot with no value on the first
+    day shown is left out, because its line could not start level with the rest.
+    Returns a `date` column followed by one column per series.
     """
     from tradebot.league import equity_table
     equity = equity_table(conn)
@@ -233,17 +236,20 @@ def league_curves(conn, benchmark: str, period: str = "All history",
     if days is None:
         if not live_from:
             return pd.DataFrame()
-        window = equity[equity.index >= pd.Timestamp(live_from)]
+        begin = pd.Timestamp(live_from)
     elif days:
-        window = equity[equity.index >= equity.index.max() - pd.Timedelta(days=days)]
+        begin = equity.index.max() - pd.Timedelta(days=days)
     else:
-        window = equity
-    window = window.dropna(how="all")
+        begin = equity.index.min()
+    if selected in equity.columns:
+        begin = max(begin, equity[selected].first_valid_index())
+    window = equity[equity.index >= begin].dropna(how="all")
     if len(window) < 2:
         return pd.DataFrame()
+    window = window.loc[:, window.iloc[0].notna()]
     base = float(equity.dropna(how="all").iloc[0].dropna().iloc[0])      # every bot starts with the same cash
     spy = db.load_close(conn, benchmark).reindex(window.index).ffill()
-    out = window / window.bfill().iloc[0] * base
+    out = window / window.iloc[0] * base
     if spy.notna().any():
         out[BENCHMARK_LABEL] = spy / spy.dropna().iloc[0] * base
     return out.rename_axis("date").reset_index()

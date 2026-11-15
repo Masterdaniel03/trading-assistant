@@ -135,9 +135,13 @@ def test_page_shows_the_league_runs_and_unread_alerts(tmp_path, monkeypatch):
         {"name": "fetch prices", "code": 1, "seconds": 3.0, "output": "Fetch failed for XYZ"}]))
 
     page = open_page(path, tmp_path, monkeypatch)
-    assert [e.value.split("\n")[0] for e in page.error] == ["Daily run 2026-11-13: problem in fetch prices"]
+    assert [(e.proto.title, e.value) for e in page.error] == [
+        ("Daily run 2026-11-13: problem in fetch prices", "exit code 1 costs \\$5")]     # the $ is escaped
     assert "Bot league" in [t.label for t in page.tabs] and "Runs and alerts" in [t.label for t in page.tabs]
-    assert page.selectbox[0].options == ["hold-aaa", "hold-pair"]
+    assert page.selectbox(key="league_bot").options == ["hold-aaa", "hold-pair"]
+    assert page.segmented_control(key="league_period").value == "All history"
+    page.segmented_control(key="league_period").set_value("Live only").run()
+    assert not page.exception
     assert any("PROBLEM in fetch prices" in e.label for e in page.expander)
     assert any("Fetch failed for XYZ" in c.value for c in page.code)
 

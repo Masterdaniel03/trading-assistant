@@ -64,6 +64,33 @@ universes:
   etfs: [SPY, QQQ, IWM, DIA, EFA, EEM, TLT, IEF, LQD, GLD,
          XLK, XLF, XLE, XLV, XLY, XLP, XLI, XLU, XLB, XLRE]
 
+  # The S&P 500 as it was listed at the end of 2015 (504 tickers of that day, including
+  # companies that were later bought or delisted). Built by scripts/build_universe.py.
+  sp500_2016: "file:universes/sp500_2016.txt"
+
+# The ranking model: each day it scores every stock in a wide universe from
+# price and volume history (the candlestick shapes and money-flow measures, as
+# numbers) and the league's rank-* bots hold the highest scores.
+#   python main.py model-fetch    download / refresh the universe's prices (Alpaca)
+#   python main.py model-test     walk-forward test -> reports/model_test_report.md
+# Every score for a day comes from a model trained only on earlier years.
+# These settings were fixed before the first test run. Tuning them against the
+# test results would make the test meaningless.
+model:
+  universe: sp500_2016
+  prices_path: data/model_prices.db
+  start: "2016-01-01"          # Alpaca's daily history begins here
+  asof: "2016-01-04"           # tickers are read as they were on this day
+  break_ratio: 3.0             # a close 3x the previous one (or a third of it) is a data break:
+                               # the stock's history ends there (see tradebot/modeldata.py)
+  horizon_days: 5              # predict which stocks do best over the next week
+  first_test_year: 2019        # 2016-2018 train the first model
+  top_n: 25                    # the test's "top" group, and what a rank bot holds
+  models:
+    ridge: {alpha: 100.0}      # a straight-line model
+    gbm: {max_iter: 200, learning_rate: 0.03, max_leaf_nodes: 16, min_samples_leaf: 500,
+          l2_regularization: 1.0}   # boosted trees: can use combinations of inputs
+
 # The bot league: simulated bots that follow the paper bot's rules (decide after
 # the close, trade at the next open, same position cap, stop-loss and costs),
 # each with its own strategy and list of symbols. Fills are simulated from stored
@@ -72,6 +99,9 @@ universes:
 #   params: {fast: 20}         strategy settings, in place of `strategies` above
 #   risk: {max_position_pct: 0.10}
 #   stop_loss: false
+#   start: "2019-01-01"        begin later than history_start
+#   model: ridge               a rank bot: follow that ranking model (see `model` above)
+#   top_n: 25, rebalance_days: 5
 league:
   start_cash: 100000
   history_start: "2016-01-04"   # prices start in 2015; the first year warms up the indicators
@@ -84,6 +114,12 @@ league:
     - {name: trend-etfs, strategy: sma_crossover, universe: etfs}
     - {name: momentum-etfs, strategy: momentum, universe: etfs}
     - {name: hold-large30, strategy: buy_and_hold, universe: large30, stop_loss: false}   # baseline
+    # Rank bots hold the 25 stocks the ranking model scores highest and re-pick every 5 days.
+    # They start in 2019, the first year the model was scored without hindsight.
+    - {name: rank-ridge, model: ridge, universe: sp500_2016}
+    - {name: rank-gbm, model: gbm, universe: sp500_2016}
+    - {name: hold-sp500, strategy: buy_and_hold, universe: sp500_2016, stop_loss: false,
+       start: "2019-01-01"}                                                               # their baseline
 
 # Alerts: a failed daily run, a stop-loss, a day the bot refused to trade.
 # Every alert is kept in the database and logs/alerts.log. To also get them on a

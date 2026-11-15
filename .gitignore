@@ -9,3 +9,4 @@ reports/*.csv
 reports/*.md
 .pytest_cache/
 logs/
+data/models/

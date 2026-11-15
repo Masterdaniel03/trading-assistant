@@ -118,8 +118,9 @@ def test_every_run_is_recorded_with_its_steps(conn, tmp_path):
     run = db.runs_df(conn).iloc[0]
     assert (run["session"], run["status"]) == ("2026-11-11", "failed") and run["finished"]
     steps = json.loads(run["steps"])
-    assert [s["name"] for s in steps] == ["fetch prices", "research notes (Gemini)", "paper trading", "bot league"]
-    assert [s["code"] for s in steps] == [0, 1, 0, 0] and "last line of research" in steps[1]["output"]
+    assert [s["name"] for s in steps] == ["fetch prices", "research notes (Gemini)", "paper trading",
+                                          "model prices", "model scores", "bot league"]
+    assert [s["code"] for s in steps] == [0, 1, 0, 0, 0, 0] and "last line of research" in steps[1]["output"]
 
 
 def test_a_day_that_is_not_a_trading_day_records_nothing(conn, tmp_path):

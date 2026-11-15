@@ -8,6 +8,7 @@ google-genai>=1.0
 pydantic>=2.0
 requests>=2.31
 scikit-learn>=1.4
+lxml>=5.0               # scripts/build_universe.py reads a table from a web page
 streamlit>=1.40
 matplotlib>=3.7
 pytest>=8.0

@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS league_trades (
     qty REAL NOT NULL, price REAL NOT NULL, notional REAL NOT NULL, reason TEXT
 );
 CREATE INDEX IF NOT EXISTS league_trades_bot ON league_trades (bot, date);
+-- The ranking model's score for each stock on each day. Written once, never changed.
+CREATE TABLE IF NOT EXISTS model_scores (
+    model TEXT NOT NULL, date TEXT NOT NULL, symbol TEXT NOT NULL, score REAL NOT NULL,
+    PRIMARY KEY (model, date, symbol)
+);
 CREATE TABLE IF NOT EXISTS league_positions (
     bot TEXT NOT NULL, symbol TEXT NOT NULL, qty REAL NOT NULL, entry_price REAL,
     last_price REAL, value REAL NOT NULL,
