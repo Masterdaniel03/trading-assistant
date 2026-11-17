@@ -7,8 +7,9 @@ alpaca-py>=0.30
 google-genai>=1.0
 pydantic>=2.0
 requests>=2.31
-scikit-learn>=1.4
+scikit-learn>=1.4,!=1.9.1   # 1.9.1: one of its DLLs is blocked by Windows Smart App Control on this PC
 lxml>=5.0               # scripts/build_universe.py reads a table from a web page
 streamlit>=1.40
+pyarrow!=26.0.1            # 26.0.1: its _acero DLL is blocked by Windows Smart App Control on this PC (pulled in by pandas/streamlit)
 matplotlib>=3.7
 pytest>=8.0

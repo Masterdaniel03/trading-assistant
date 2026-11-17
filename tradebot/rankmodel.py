@@ -103,8 +103,11 @@ def fit_fold(name: str, settings: dict, data: Dataset, fold: dict):
 
 
 def fingerprint(name: str, settings: dict, data: Dataset, fold: dict) -> str:
-    """Changes whenever the trained model would: settings, features, horizon, or the training period."""
+    """Changes whenever the trained model would: settings, features, horizon, the training period,
+    or the scikit-learn version (a model pickled by one version may load wrongly in another)."""
+    import sklearn
     text = json.dumps({"model": name, "settings": settings, "features": features.NAMES,
+                       "sklearn": sklearn.__version__,
                        "horizon": data.horizon, "trained_through": str(fold["trained_through"].date()),
                        "rows": fold["train_rows"]}, sort_keys=True)
     return hashlib.sha1(text.encode()).hexdigest()[:12]
