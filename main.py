@@ -584,6 +584,42 @@ def cmd_daily(cfg, args):
         sys.exit(1)
 
 
+def run_daily_guarded(args):
+    """Start `cmd_daily`, recording any crash in logs/daily_run.log and as an alert.
+
+    The scheduled task runs under pythonw: there is no console, so an error raised before
+    the run's own log opens (reading config.yaml, .env, opening the database) used to vanish
+    with nothing but exit code 1 in Task Scheduler. Exits with code 1 after recording it.
+    """
+    import traceback
+
+    cfg = None
+    try:
+        cfg = load_config()
+        cmd_daily(cfg, args)
+    except Exception as e:  # noqa: BLE001 - record anything, then still fail the task
+        with RunLog(LOGS / "daily_run.log", "daily run") as say:
+            say(f"Crashed: {type(e).__name__}: {e}. Nothing after this point ran.")
+            for line in traceback.format_exc().rstrip().splitlines():
+                say(f"    {line}")
+        try:
+            conn = db.connect(cfg["db_path"] if cfg else str(ROOT / "data" / "trading.db"))
+            db.init_db(conn)
+        except Exception:  # noqa: BLE001 - the database may be the thing that failed
+            conn = None
+        detail = f"{type(e).__name__}: {e}\nFull traceback in logs\\daily_run.log."
+        if conn is not None:
+            _alert(cfg or {}, conn, "error", "Daily run crashed", detail, "daily")
+        else:
+            try:
+                with open(LOGS / "alerts.log", "a", encoding="utf-8") as fh:
+                    fh.write(f"{datetime.now().astimezone():%Y-%m-%d %H:%M:%S %z}  ERROR   "
+                             f"Daily run crashed (database unavailable, alert not stored)\n    {detail}\n")
+            except OSError:
+                pass
+        sys.exit(1)
+
+
 def _model_setup(cfg):
     model = cfg.get("model")
     if not model:
@@ -845,4 +881,7 @@ if __name__ == "__main__":
             stream.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args()
-    COMMANDS[args.cmd](load_config(), args)
+    if args.cmd == "daily":
+        run_daily_guarded(args)
+    else:
+        COMMANDS[args.cmd](load_config(), args)

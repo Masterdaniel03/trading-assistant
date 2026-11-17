@@ -54,3 +54,25 @@ def test_a_failed_step_does_not_stop_the_next_ones(tmp_path):
                              "model prices": 0, "model scores": 0, "bot league": 0}
     assert "problems in: fetch prices, research notes (Gemini)" in (
         tmp_path / "logs" / "daily_run.log").read_text(encoding="utf-8")
+
+
+def test_a_crash_before_the_run_log_opens_is_still_recorded(tmp_path, monkeypatch):
+    """Under pythonw there is no console: a startup error must land in the log and as an alert."""
+    import pytest
+
+    import main
+    from tradebot import db
+
+    def broken(cfg, args):
+        raise PermissionError("database is locked")
+
+    monkeypatch.setattr(main, "LOGS", tmp_path / "logs")
+    monkeypatch.setattr(main, "load_config", lambda: {"db_path": str(tmp_path / "t.db")})
+    monkeypatch.setattr(main, "cmd_daily", broken)
+    with pytest.raises(SystemExit) as stop:
+        main.run_daily_guarded(None)
+    assert stop.value.code == 1
+    text = (tmp_path / "logs" / "daily_run.log").read_text(encoding="utf-8")
+    assert "Crashed: PermissionError: database is locked" in text and "Traceback" in text
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert conn.execute("select title from alerts").fetchall() == [("Daily run crashed",)]
