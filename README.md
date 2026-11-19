@@ -31,8 +31,8 @@ A research and paper-trading system for stocks and crypto. It ingests market dat
 
 **Where things are**
 - `main.py`: every command below. `config.yaml`: all settings. `.env`: keys (never committed).
-- `tradebot/`: the code, one file per box in the diagram above, plus `db.py` (SQLite tables), `daily.py` (the scheduled run), `runlog.py`, `retry.py` and `account_sync.py`.
-- `universes/`: the no-hindsight 503-stock list and its SEC numbers. `scripts/`: building that list, and installing the scheduled task.
+- `tradebot/`: the code, one file per box in the diagram above, plus `db.py` (SQLite tables), `daily.py` (the scheduled run), `manifest.py` (each test report's run record), `runlog.py`, `retry.py` and `account_sync.py`.
+- `universes/`: the no-hindsight 503-stock list and its SEC numbers. `scripts/`: building that list, installing the scheduled task, and checking what the stop-loss and costs take from the rank bots.
 - `tests/`: `pytest`. `data/`, `logs/` and most of `reports/` are made by running the commands and are not committed.
 
 **Two tracks**
@@ -72,12 +72,13 @@ python main.py fetch
 | `python main.py model-score [--rebuild]` | Score every stock for each day that has no score yet (the daily step) |
 | `python main.py model-test [--rebuild]` | Walk-forward test of the ranking model → `reports/model_test_report.md` (see below). `--rebuild` deletes stored scores and saved models first; needed after changing `model` settings |
 | `python main.py league` | Replay every league bot on the stored prices and print the leaderboard (see below) |
+| `python scripts/league_attribution.py [--end DATE]` | Replay each rank bot as set, without its stop-loss, and without stop-loss or costs, against `hold-sp500` (research only; nothing is stored). See [Why the rank bots trail](#why-the-rank-bots-trail-hold-sp500) |
 | `python main.py pause` / `resume` | Stop the paper bot from buying, or let it buy again. Sells and stop-loss exits always go through |
 | `python main.py alerts` / `alert-test` | List recent alerts, or send a test alert through every channel that is switched on |
 | `python main.py log-trade buy AAPL 2 228.50 --followed-ai yes --notes "..."` | Record a manual Fidelity trade (the dashboard has a form for this too) |
 | `python main.py dashboard` | Open the dashboard in your browser (see below) |
 | `python main.py report` | Trade counts, % of manual trades that followed the AI, latest equity |
-| `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, paper runs, research checks, company filings' dating, DB) |
+| `pytest` | Run tests (indicators, signals, look-ahead, costs, risk limits, paper runs, research checks, company filings' dating, run records, DB) |
 
 Settings (watchlist, strategy parameters, risk limits, league bots, alerts) are in `config.yaml`.
 With no symbols given, `fetch` downloads the watchlist plus every symbol a league bot trades.
@@ -119,7 +120,7 @@ The first step towards a strategy of your own: a model that scores every stock e
 - **Scores are written once.** A stored score is never recomputed, so what the league's rank bots saw stays put.
 - **Data breaks.** A close more than 3 times the previous one, or less than a third of it, is treated as a break in the data (a bankrupt company's new shares taking over the ticker, or an unadjusted split or spin-off), and the stock's history ends the day before. The report lists every series cut this way.
 
-**First result (2026-11-14; scored out of sample from 2019 to 2026, 1,973 days):** both models rank stocks a little better than chance, but not by enough to rule out luck. Rank IC is +0.011 for `ridge` (t = 1.25) and +0.013 for `gbm` (t = 1.69); `gbm` was positive in all eight years. Holding the top 25 beat holding every stock by +0.6% a year (`ridge`) and +4.9% a year (`gbm`) after costs, with t-statistics of 0.1 and 1.0. None of the 25 inputs clears |t| = 2 on its own. In the league's fuller simulation, which adds the stop-loss and position limits, both rank bots trail `hold-sp500` over the same years (+13.2% and +14.9% a year against +15.9%). There is no usable edge yet. The rank bots' live record will show whether the small positive ranking skill is real.
+**First result (2026-11-14; scored out of sample from 2019 to 2026, 1,973 days):** both models rank stocks a little better than chance, but not by enough to rule out luck. Rank IC is +0.011 for `ridge` (t = 1.25) and +0.013 for `gbm` (t = 1.69); `gbm` was positive in all eight years. Holding the top 25 beat holding every stock by +0.6% a year (`ridge`) and +4.9% a year (`gbm`) after costs, with t-statistics of 0.1 and 1.0. None of the 25 inputs clears |t| = 2 on its own. In the league's fuller simulation, which adds the stop-loss and position limits, both rank bots trail `hold-sp500` over the same years (+13.2% and +14.9% a year against +15.9%), mostly because of the stop-loss (see [Why the rank bots trail](#why-the-rank-bots-trail-hold-sp500)). There is no usable edge yet. The rank bots' live record will show whether the small positive ranking skill is real.
 
 A first run on uncleaned prices gave different dollar returns (`ridge` +4.2%, `gbm` 0.0%), because a dozen impossible price jumps were being counted as returns. The rank IC barely moved, since it only looks at the order of the stocks. That is why the data-break rule exists, and why the report lists what it cut.
 
@@ -162,15 +163,37 @@ The likely reason is the horizon, not the data. Value, quality and growth effect
 **Gaps.** Coca-Cola Europacific Partners (CCE's successor) files under IFRS, not US GAAP, so it has no data. Yahoo became Altaba, an investment fund that filed no 10-K. In November 2026, SEC's company-facts files held no 10-Q from the second or third quarter of 2026 for about ten companies, including Citigroup, NextEra and Southern. Their numbers drop out once they are a year old. The model test report lists the share of stock-days that have each input.
 
 ## Bot league
-One paper account can only follow one strategy on a handful of stocks, which produces evidence slowly. The league runs several simulated bots side by side, each with its own strategy and list of symbols (`league.bots` and `universes` in `config.yaml`): eight rule bots across 52 symbols, plus four rank bots and their baseline on the ranking model's 503 stocks.
+One paper account can only follow one strategy on a handful of stocks, which produces evidence slowly. The league runs several simulated bots side by side, each with its own strategy and list of symbols (`league.bots` and `universes` in `config.yaml`): eight rule bots across 52 symbols, plus eight rank bots and their baseline on the ranking model's 503 stocks.
 
 - **Same rules as the real bot.** Each bot decides after the close and trades at the next open, with the same position cap, order planner, stop-loss, cooldown and trading cost. Only the fills are simulated, from stored prices, so no extra broker accounts are needed.
 - **Live and history are kept apart.** The day a bot's settings are first seen is recorded. Days after it are the bot's **live** record: nothing was chosen knowing those prices. Days before it are **history**, an ordinary backtest. Changing a bot's line in the config restarts its live record.
 - **History flatters every bot.** The strategies were picked knowing the past, and the stock lists hold today's large companies, which are the ones that did well. The `hold-large30` bot (buy and hold the same 30 stocks) is the baseline to beat, not SPY.
 - **Rank bots** (`rank-ridge`, `rank-gbm`, and `rank-ridge-fund`, `rank-gbm-fund` for the models that also read company filings) hold the 25 stocks their model scores highest and re-pick every 5 trading days, under the same position cap and stop-loss. Their history starts in 2019, the first year the model was scored without hindsight, and it is a walk-forward result, not an ordinary backtest. `hold-sp500` holds all 503 stocks and is the baseline they have to beat. A holding whose stock stops trading is paid out at its last price after five days.
+- **Rank bots with a stop sized to their positions** (`rank-ridge-sized`, `rank-gbm-sized`, `rank-ridge-fund-sized`, `rank-gbm-fund-sized`, added 2026-11-18) are copies of the four rank bots with a 37.5% stop instead of 7.5%. Everything else is the same. See below for why.
 - Each run replays every bot from its start date, so a missed day changes nothing. `python main.py league` takes about a minute and writes `logs/league.log`.
 
 Picking the bot with the best history and trusting it is the overfitting this project tries to avoid. Use the live column, and give it months.
+
+### Why the rank bots trail hold-sp500
+`hold-sp500` has no stop-loss, while the rank bots do. `scripts/league_attribution.py` replays each rank bot with the league's own simulator three ways: as set, without the stop-loss, and without the stop-loss or trading costs. Over the leaderboard's history, from 2019 to 2026-11-13 (`--end 2026-11-13`), the yearly returns were as follows, with the Sharpe ratio in brackets:
+
+| Bot | 7.5% stop (as set) | 37.5% stop (`-sized` copy) | No stop | No stop, no costs | Return left after beta, no stop |
+|---|---|---|---|---|---|
+| `rank-ridge` | +13.2% (0.68) | +14.9% (0.69) | +16.4% (0.73) | +20.0% (0.85) | +1.2% a year (t = 0.26) |
+| `rank-gbm` | +14.9% (0.74) | +18.0% (0.78) | +19.8% (0.80) | +23.5% (0.91) | +3.3% a year (t = 0.71) |
+| `rank-ridge-fund` | +7.0% (0.43) | +13.6% (0.66) | +14.3% (0.68) | +17.3% (0.79) | -0.1% a year (t = -0.02) |
+| `rank-gbm-fund` | +9.9% (0.55) | +15.4% (0.72) | +16.3% (0.72) | +19.1% (0.81) | +1.2% a year (t = 0.26) |
+| `hold-sp500` | +15.9% (0.82), no stop | | | | |
+
+- **The 7.5% stop is the main reason they trail.** It was hit 824 to 892 times per bot and cost 3 to 7 points a year. It lowered every bot's Sharpe ratio, so it did not simply trade return for safety.
+- **Why it fires so often.** The stop is the 1.5% risk budget divided by the 20% position cap, which fits the paper bot's five symbols. A rank bot holds 25 stocks at 4% each, so the same rule gives 1.5% / 4% = 37.5%. The `-sized` copies use that, by capping positions at 4% (what they hold anyway), and were stopped out only 10 to 18 times.
+- **What the 7.5% stop does buy.** A smaller worst drop for the price-only models: −38.5% for `rank-gbm` against −44.5% without a stop, and −41.1% for `hold-sp500`. For the models that read company filings it made no difference. The 37.5% stop gave each model its deepest drop (−47.0% for `rank-gbm-sized`): in the March 2020 crash, where that drop happened, its stops fired near the bottom.
+- **Without the stop there is still no edge.** Once costs are paid, no rank bot's Sharpe ratio reaches `hold-sp500`'s 0.82. Without the stop they move a little more than the market (beta 0.96 to 1.09: how much a bot moved when `hold-sp500` moved 1%). The yearly return left once that is taken out is −0.1% to +3.3%, with t at most 0.71, which could easily be luck. Even before costs it is at most +6.4% (t = 1.37).
+- **Trading costs** take about 3 to 4 points a year at 5 bps per trade, because about half the holdings change each week.
+- **Not the cause:** stocks that stopped trading. The rank bots held only 0 to 3 of them when they were delisted.
+- **`rank-gbm` against `rank-gbm-fund`.** Their gap shrinks without the stop (+19.8% against +16.3%). In the model test, the gap between their top 25s was −3.9% a year with t = −1.01, which could be luck.
+
+Choosing a stop after seeing this history would be hindsight. So the original rank bots keep their 7.5% stop and their live record, and the `-sized` copies were added with their settings written into `config.yaml` first. Only their live record, from 2026-11-19 on, counts as evidence.
 
 ## Alerts
 The system tells you when something needs attention:
@@ -234,14 +257,25 @@ The PC has to be on (or asleep, which Windows can wake it from). If it was off a
 - [x] Phase 2a: walk-forward / out-of-sample testing; more strategies (momentum, volatility targeting)
 - [ ] Phase 2b: crypto on Alpaca (`BTC/USD`)
 - [x] Phase 3a: LLM research layer (recent news → a checked stance with written reasoning, stored in `signals.reason`; forward scoring)
-- [ ] Phase 3b: earnings dates and filings as extra research inputs; decide from the scores whether the notes should influence the bot
+- [ ] Phase 3b: earnings dates and filings as extra research inputs; run research after events (earnings, 8-K filings, unusually large price moves or news volume) instead of on the same list every day, so notes overlap less and `research-score` gets more independent evidence; decide from the scores whether the notes should influence the bot
 - [x] Phase 3c: point-in-time news test (walk-forward, headlines → next session)
 - [x] Phase 4: Streamlit dashboard: bot vs. manual vs. SPY, Sharpe, drawdown, AI-follow rate
 - [x] Phase 4b: failure alerts, pause switch, bot league (8 simulated bots, 52 symbols), dashboard controls and run history
 - [x] Phase 6a: ranking model on a no-hindsight 503-stock universe (25 price, candle and money-flow inputs; walk-forward test; rank bots in the league)
 - [x] Phase 6b: fundamentals from SEC filings, dated by when each number became public, as extra model inputs (9 inputs; `ridge-fund` and `gbm-fund`, each compared with its price-only twin)
+- [x] What the stop-loss and costs take from the rank bots (`scripts/league_attribution.py`); rank bot copies with a stop sized to their positions
+- [x] A run record (commit, settings and stock-list fingerprints) on every test report
 - [ ] Phase 5: write-up of results (including what didn't work). Waits for a few months of live league and research-note records
 - [ ] Next test to pre-register: the same filing inputs against a one-to-three-month horizon, the scale at which value and quality effects were found
+
+## Run records
+A test's settings are written into `config.yaml` before its first run and never tuned against its result. Each test report records what it ran with, so that can be checked later. `model-test` and `news-test` end their report with a **Run record** section, and `model-test`, `news-test` and `walk-forward` each save a JSON file next to their report (for example `reports/model_test_report.run.json`). The record holds:
+- the git commit, and whether tracked files (`config.yaml` included) had uncommitted changes;
+- a fingerprint of the test's own settings in `config.yaml`, which changes only when those settings change;
+- a fingerprint of the whole `config.yaml`, of the stock list, and of each data file the test reads (such as the SEC numbers);
+- when the test started, and the Python and package versions.
+
+A fingerprint is a SHA-256 hash: the same input always gives the same one, and any change gives a different one. Two reports with the same settings fingerprint ran with the same settings. The record never changes a result (`tradebot/manifest.py`).
 
 ## Notes on honest evaluation
 - Always compare against buy & hold of the same asset **and** SPY.

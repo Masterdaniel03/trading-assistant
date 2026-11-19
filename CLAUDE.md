@@ -17,13 +17,13 @@ A research and paper-trading system: price data → backtests and walk-forward t
 
 ## Layout
 - `main.py`: the CLI (one `cmd_*` function per command). `config.yaml`: all settings, loaded by `tradebot/config.py`, which also resolves paths.
-- `tradebot/`: `data.py` prices, `strategies.py`, `backtest.py`, `walkforward.py`, `rebalance.py` + `risk.py` + `broker.py` (paper bot), `league.py`, `research.py` + `llm.py` + `news.py` (LLM notes), `newstest.py` + `news_archive.py`, `modeldata.py` + `features.py` + `fundamentals.py` + `rankmodel.py` (ranking model), `daily.py` (scheduled run), `alerts.py`, `dashboard_data.py` + `dashboard_charts.py`.
-- `dashboard.py`: the Streamlit page. `universes/`: the no-hindsight S&P 500 list as of end 2015, plus its SEC CIKs and CIK successors. `scripts/`: `build_universe.py`, `install_schedule.ps1`.
+- `tradebot/`: `data.py` prices, `strategies.py`, `backtest.py`, `walkforward.py`, `rebalance.py` + `risk.py` + `broker.py` (paper bot), `league.py`, `research.py` + `llm.py` + `news.py` (LLM notes), `newstest.py` + `news_archive.py`, `modeldata.py` + `features.py` + `fundamentals.py` + `rankmodel.py` (ranking model), `daily.py` (scheduled run), `alerts.py`, `dashboard_data.py` + `dashboard_charts.py`, `manifest.py` (run records on test reports).
+- `dashboard.py`: the Streamlit page. `universes/`: the no-hindsight S&P 500 list as of end 2015, plus its SEC CIKs and CIK successors. `scripts/`: `build_universe.py`, `install_schedule.ps1`, `league_attribution.py` (what the stop-loss and costs take from the rank bots; read-only).
 - Generated and not committed: `data/*.db`, `data/models/`, `logs/`, most of `reports/`.
 
 ## Rules that matter here
 - **No look-ahead.** Every input must be known at decision time: decide after the close, trade at the next open; a filing counts from the trading day after its filing date; restatements only from the restating filing's date. Each test has a point-in-time audit; keep it passing.
-- **Settings are fixed before a test runs.** Never tune a model, horizon, input list or universe against a test result. A new idea is a new test, with its settings written into `config.yaml` (with the date) before its first run. Stored model scores are never recomputed.
+- **Settings are fixed before a test runs.** Never tune a model, horizon, input list or universe against a test result. A new idea is a new test, with its settings written into `config.yaml` (with the date) before its first run. Stored model scores are never recomputed. Each test report carries a run record (`tradebot/manifest.py`); a new test lists the config sections it reads in `manifest.SETTINGS`. A changed league bot is added as a new bot, so the old one keeps its live record.
 - **Paper only.** Live trading stays blocked (`risk.allow_live` plus `ALPACA_PAPER`). Don't weaken a risk guard (position cap, stop-loss, daily loss limit, stale-data check, pause switch) without being asked.
 - Paper runs may be done without asking, as long as each run leaves its saved log (`logs/paper_trading.log`).
 - Report results honestly, including null results. Compare against buy and hold and against SPY.

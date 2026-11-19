@@ -140,6 +140,15 @@ league:
     # The same rank bots following the models that also read company filings (Phase 6b).
     - {name: rank-ridge-fund, model: ridge-fund, universe: sp500_2016}
     - {name: rank-gbm-fund, model: gbm-fund, universe: sp500_2016}
+    # Copies of the four rank bots with a stop sized to their positions (added 2026-11-18). The 7.5% stop
+    # is the 1.5% risk budget over the 20% position cap, which fits the paper bot's 5 symbols. A rank bot
+    # holds 25 stocks at 4% each, so the same rule gives 1.5% / 4% = a 37.5% stop. Capping positions at
+    # 4%, which is what they hold anyway (1 / model.top_n), applies it. Everything else is the same. Their
+    # history was seen before they were added (scripts/league_attribution.py), so only their live record counts.
+    - {name: rank-ridge-sized, model: ridge, universe: sp500_2016, risk: {max_position_pct: 0.04}}
+    - {name: rank-gbm-sized, model: gbm, universe: sp500_2016, risk: {max_position_pct: 0.04}}
+    - {name: rank-ridge-fund-sized, model: ridge-fund, universe: sp500_2016, risk: {max_position_pct: 0.04}}
+    - {name: rank-gbm-fund-sized, model: gbm-fund, universe: sp500_2016, risk: {max_position_pct: 0.04}}
 
 # Alerts: a failed daily run, a stop-loss, a day the bot refused to trade.
 # Every alert is kept in the database and logs/alerts.log. To also get them on a

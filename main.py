@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from tradebot import db
+from tradebot import db, manifest
 from tradebot.alerts import raise_alert
 from tradebot.backtest import compare, format_metrics, plot_equity, run_backtest, with_stop_loss
 from tradebot.config import ROOT, load_config, load_secrets
@@ -219,8 +219,11 @@ def cmd_walk_forward(cfg, args):
     conn = db.connect(cfg["db_path"])
     wf, bt = cfg["walk_forward"], cfg["backtest"]
     names = [args.strategy] if args.strategy else list(wf["grids"])
+    symbols = args.symbols or cfg["watchlist"]
+    record = manifest.build("walk-forward", symbols,
+                            options={"symbols": args.symbols, "strategy": args.strategy, "no_stop": args.no_stop})
     rows, skipped = [], []
-    for sym in args.symbols or cfg["watchlist"]:
+    for sym in symbols:
         close = db.load_close(conn, sym)
         ppy = periods_per_year(sym)
         for name in names:
@@ -250,10 +253,11 @@ def cmd_walk_forward(cfg, args):
     df = pd.DataFrame(rows)
     df["beats_bh_sharpe"] = df["oos_sharpe"] > df["bh_sharpe"]
     REPORTS.mkdir(exist_ok=True)
-    df.to_csv(REPORTS / "walk_forward_summary.csv", index=False)
+    path = REPORTS / "walk_forward_summary.csv"
+    df.to_csv(path, index=False)
     with pd.option_context("display.float_format", "{:.3f}".format, "display.width", 180):
         print(df.to_string(index=False))
-    print(f"\nSaved {REPORTS / 'walk_forward_summary.csv'}")
+    print(f"\nSaved {path}, and its run record in {manifest.write(record, path).name}")
 
 
 def _current_targets(cfg, conn, strategy_name, symbols, log=True):
@@ -386,6 +390,7 @@ def cmd_news_test(cfg, args):
     archive = ROOT / nt["archive_path"]
     if not archive.exists():
         sys.exit("No news archive yet. Run: python main.py news-archive")
+    record = manifest.build("news-test", nt["universe"])
     articles = news_archive.load_articles(news_archive.connect(archive))
     conn = db.connect(cfg["db_path"])
     prices = db.load_ohlcv(conn, nt["universe"])
@@ -396,12 +401,16 @@ def cmd_news_test(cfg, args):
     result = newstest.run(articles, prices, universe=[s for s in nt["universe"] if s in have],
                           aliases=nt.get("aliases") or {}, start=nt["start"], no_prices=missing,
                           settings=newstest.Settings(cost_bps=cfg["backtest"]["cost_bps"]))
-    report = newstest.render(result)
+    _save_report(REPORTS / "news_test_report.md", newstest.render(result), record)
+
+
+def _save_report(path, report: str, record: dict) -> None:
+    """Print a Markdown test report and save it with its run record (tradebot/manifest.py)."""
+    report = manifest.append(report, record, path)
     print(report)
     REPORTS.mkdir(exist_ok=True)
-    path = REPORTS / "news_test_report.md"
     path.write_text(report + "\n", encoding="utf-8")
-    print(f"\nSaved {path}")
+    print(f"\nSaved {path}, and its run record in {manifest.write(record, path).name}")
 
 
 def _in_cooldown(conn, symbol, risk) -> bool:
@@ -737,6 +746,9 @@ def cmd_model_test(cfg, args):
     from tradebot import rankmodel
 
     model, conn = _model_setup(cfg)
+    fc = cfg.get("fundamentals") or {}
+    files = [fc[key] for key in ("ciks", "successors") if fc.get(key)] if rankmodel.needs_fundamentals(model) else []
+    record = manifest.build("model-test", cfg["universes"][model["universe"]], files, {"rebuild": args.rebuild})
     with RunLog(LOGS / "model.log", "model-test") as say:
         if args.rebuild:
             _clear_scores(conn, say)
@@ -762,11 +774,7 @@ def cmd_model_test(cfg, args):
                         fund_companies=data.fund_companies, twins=rankmodel.twins(model))
         report = rankmodel.render(results, rankmodel.single_inputs(data, test_days),
                                   rankmodel.look_ahead_example(panels, data, test_days), plan, info)
-    print(report)
-    REPORTS.mkdir(exist_ok=True)
-    path = REPORTS / "model_test_report.md"
-    path.write_text(report + "\n", encoding="utf-8")
-    print(f"\nSaved {path}")
+    _save_report(REPORTS / "model_test_report.md", report, record)
 
 
 def cmd_league(cfg, args):
@@ -789,10 +797,10 @@ def cmd_league(cfg, args):
             f"${(cfg.get('league') or {}).get('start_cash', 100_000):,.0f}.")
         say("LIVE = after the bot's settings were fixed (real evidence). "
             "HISTORY = backtest before that (settings chosen with hindsight).")
-        say(f"{'bot':<20}{'symbols':>8}{'invested':>10}{'live days':>11}{'live':>9}{'SPY live':>10}"
+        say(f"{'bot':<23}{'symbols':>8}{'invested':>10}{'live days':>11}{'live':>9}{'SPY live':>10}"
             f"{'hist/yr':>9}{'SPY/yr':>8}{'Sharpe':>8}{'worst drop':>12}{'trades':>8}")
         for row in board.itertuples():
-            say(f"{row.bot:<20}{row.symbols:>8}{pct(row.invested, False):>10}{row.live_days:>11}"
+            say(f"{row.bot:<23}{row.symbols:>8}{pct(row.invested, False):>10}{row.live_days:>11}"
                 f"{pct(row.live_return):>9}{pct(row.spy_live_return):>10}{pct(row.history_cagr):>9}"
                 f"{pct(row.spy_history_cagr):>8}{num(row.history_sharpe):>8}"
                 f"{pct(row.history_max_drawdown):>12}{row.trades:>8}")

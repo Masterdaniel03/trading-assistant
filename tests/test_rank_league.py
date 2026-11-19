@@ -1,4 +1,7 @@
 """Rank bots in the league, stocks that stop trading, data breaks, and universes read from a file."""
+import importlib.util
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -6,6 +9,7 @@ import pytest
 from tradebot import config, db, league, modeldata, rankmodel
 from tradebot import dashboard_data as dd
 from tradebot.league import BotSpec, load_bots, simulate, target_table
+from tradebot.risk import stop_loss_pct, target_notional
 
 RISK = {"max_position_pct": 0.20, "max_total_exposure_pct": 1.0, "max_risk_per_position_pct": 0.015,
         "stop_cooldown_bars": 2, "daily_loss_limit_pct": 0.03, "min_order_notional": 1.0}
@@ -240,6 +244,67 @@ def test_the_real_config_loads_with_the_wide_universe_and_valid_league_bots():
     bots = {bot.name: bot for bot in load_bots(cfg)}
     assert bots["rank-ridge"].top_n == cfg["model"]["top_n"] and bots["rank-gbm"].model == "gbm"
     assert bots["hold-sp500"].universe == cfg["model"]["universe"]
+
+
+def test_the_sized_rank_bots_differ_from_their_twins_only_in_the_stop():
+    bots = {bot.name: bot for bot in load_bots(config.load_config())}
+    for name in ("rank-ridge", "rank-gbm", "rank-ridge-fund", "rank-gbm-fund"):
+        plain, sized = bots[name], bots[f"{name}-sized"]
+        assert (sized.model, sized.top_n, sized.rebalance_days, sized.symbols, sized.start, sized.stop_loss) == \
+               (plain.model, plain.top_n, plain.rebalance_days, plain.symbols, plain.start, plain.stop_loss)
+        assert {k: v for k, v in sized.risk.items() if k != "max_position_pct"} == \
+               {k: v for k, v in plain.risk.items() if k != "max_position_pct"}
+        assert stop_loss_pct(plain.risk) == pytest.approx(0.075) and stop_loss_pct(sized.risk) == pytest.approx(0.375)
+        # Both put 1/top_n of the account in each stock: the 4% cap equals that weight, so it never binds.
+        assert target_notional(100_000, 1.0, plain.top_n, sized.risk) == \
+               pytest.approx(target_notional(100_000, 1.0, plain.top_n, plain.risk))
+
+
+# ---------------------------------------------------------------- what the stop and the costs take
+
+def test_the_replay_variants_change_only_the_stop_and_the_costs():
+    spec = rank_spec(stop_loss=True)
+    out = league.variants(spec, 5.0)
+    assert list(out) == ["as set", "no stop", "no stop or costs"]
+    assert out == {"as set": (spec, 5.0), "no stop": (replace(spec, stop_loss=False), 5.0),
+                   "no stop or costs": (replace(spec, stop_loss=False), 0.0)}
+
+
+def test_beta_and_the_return_left_after_it():
+    rng = np.random.default_rng(0)
+    days = pd.bdate_range("2026-01-05", periods=200)
+    base = pd.Series(rng.normal(0, 0.01, 200), index=days)
+    double = league.against(2 * base, base)
+    assert double["beta"] == pytest.approx(2.0) and double["alpha"] == pytest.approx(0.0, abs=1e-12)
+    lifted = league.against(base + 0.001 + pd.Series(rng.normal(0, 0.001, 200), index=days), base)
+    assert lifted["beta"] == pytest.approx(1.0, abs=0.05)
+    assert lifted["alpha"] == pytest.approx(0.252, abs=0.05) and lifted["t_stat"] > 5   # 0.1% a day, 252 days
+
+
+def attribution_script():
+    path = config.ROOT / "scripts" / "league_attribution.py"
+    spec = importlib.util.spec_from_file_location("league_attribution", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_attribution_script_replays_each_rank_bot_with_and_without_its_stop(two_databases, capsys):
+    _, model = two_databases
+    # A, a top pick from 2026-11-04, falls 10% two days after it is bought, then recovers to 11.
+    store(model, "A", [10.0, 10.0, 10.0, 10.0, 9.0, 9.0, 10.5, 11.0, 11.0, 11.0, 11.0, 11.0])
+    script = attribution_script()
+    table, base = script.replay(CFG, model)
+    rows = table.set_index("variant")
+    assert list(table["bot"].unique()) == ["rank-ridge"] and base["name"] == "hold-wide"
+    assert rows["stop_outs"].to_dict() == {"as set": 1, "no stop": 0, "no stop or costs": 0}
+    assert rows.loc["no stop", "total_return"] > rows.loc["as set", "total_return"]   # sold at the low
+    assert f"{base['first']:%Y-%m-%d}" == "2026-11-04"
+    _, cut = script.replay(CFG, model, end="2026-11-10")
+    assert f"{cut['last']:%Y-%m-%d}" == "2026-11-10"
+    script.show(table, base)
+    shown = capsys.readouterr().out
+    assert "Rank bots against hold-wide, 2026-11-04 to 2026-11-17" in shown and "no stop or costs" in shown
 
 
 # ---------------------------------------------------------------- the commands

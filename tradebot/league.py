@@ -26,7 +26,7 @@ Two periods are kept apart, because only one of them is evidence:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -282,6 +282,31 @@ def stats(equity: pd.Series) -> dict:
             "cagr": float((1 + total) ** (1 / years) - 1) if years >= 1 else None,
             "max_drawdown": float((equity / equity.cummax() - 1).min()),
             "sharpe": float(returns.mean() / returns.std() * np.sqrt(252)) if enough else None}
+
+
+def variants(spec: BotSpec, cost_bps: float) -> dict[str, tuple[BotSpec, float]]:
+    """The bot as configured, without its stop-loss, and without stop-loss or trading costs.
+    Research only (scripts/league_attribution.py): replaying all three shows how much of a
+    bot's result the stop and the costs take. Nothing about the bot itself changes."""
+    no_stop = replace(spec, stop_loss=False)
+    return {"as set": (spec, cost_bps), "no stop": (no_stop, cost_bps), "no stop or costs": (no_stop, 0.0)}
+
+
+def against(returns: pd.Series, baseline: pd.Series) -> dict:
+    """Compare daily returns with a baseline's over the same days.
+
+    beta:   how much the bot moves when the baseline moves 1%.
+    alpha:  the yearly return left once beta times the baseline's return is taken out.
+    t_stat: alpha against its own noise. Sums over 5-day blocks are used, because
+            neighbouring days are not fully independent.
+    """
+    r, b = returns.align(baseline, join="inner")
+    beta = float(r.cov(b) / b.var())
+    rest = r - beta * b
+    blocks = rest.groupby(np.arange(len(rest)) // 5).sum()
+    spread = blocks.std()
+    t_stat = float(blocks.mean() / (spread / np.sqrt(len(blocks)))) if spread > 0 else float("nan")
+    return {"beta": beta, "alpha": float(rest.mean() * 252), "t_stat": t_stat}
 
 
 def run_league(conn, cfg: dict, say=print, model_conn=None) -> pd.DataFrame:

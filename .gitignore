@@ -7,6 +7,7 @@ data/*.db
 reports/*.png
 reports/*.csv
 reports/*.md
+reports/*.json
 .pytest_cache/
 logs/
 data/models/
