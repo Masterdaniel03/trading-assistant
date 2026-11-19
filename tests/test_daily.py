@@ -14,7 +14,7 @@ def recorder(codes=None):
     return run, calls
 
 
-EVERY_DAY = ["fetch", "research", "paper", "model-fetch", "model-score", "league"]
+EVERY_DAY = ["fetch", "research", "paper", "model-fetch", "fundamentals-fetch", "model-score", "league"]
 
 
 def test_a_normal_weekday_runs_its_steps_in_order_with_trading_before_the_model(tmp_path):
@@ -51,7 +51,7 @@ def test_a_failed_step_does_not_stop_the_next_ones(tmp_path):
     results = daily_run(tmp_path, WEEK, "2026-11-11", run)
     assert calls == EVERY_DAY                                        # paper's own guards decide
     assert dict(results) == {"fetch prices": 1, "research notes (Gemini)": 1, "paper trading": 0,
-                             "model prices": 0, "model scores": 0, "bot league": 0}
+                             "model prices": 0, "company filings (SEC)": 0, "model scores": 0, "bot league": 0}
     assert "problems in: fetch prices, research notes (Gemini)" in (
         tmp_path / "logs" / "daily_run.log").read_text(encoding="utf-8")
 

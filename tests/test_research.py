@@ -227,6 +227,39 @@ def test_score_groups_kept_notes_by_stance(conn):
     assert table.loc["bullish", "avg_return_1"] == pytest.approx(0.10)
     assert table.loc["bearish", "avg_return_1"] == pytest.approx(-0.10)
     assert table.loc["bullish", "scored_5"] == 0 and np.isnan(table.loc["bullish", "avg_return_5"])
+    assert np.isnan(table.loc["bullish", "vs_SPY_1"])       # no SPY prices stored: no comparison
+
+
+def test_score_compares_each_note_with_the_market_over_the_same_days(conn):
+    dates = pd.bdate_range("2026-11-02", periods=4).strftime("%Y-%m-%d")
+    for sym, closes in (("UP", [100.0, 100, 110, 121]), ("DOWN", [100.0, 100, 90, 81]),
+                        ("SPY", [100.0, 100, 95, 90.25])):           # the market falls 5% a day
+        db.upsert_prices(conn, pd.DataFrame({"symbol": sym, "date": dates, "open": closes,
+                                             "high": closes, "low": closes, "close": closes,
+                                             "volume": 1.0}))
+    common = dict(as_of=dates[0], model="m", cache_key="k", status="ok")
+    db.save_research(conn, symbol="UP", stance="bullish", **common)
+    db.save_research(conn, symbol="DOWN", stance="bearish", **common)
+    db.save_research(conn, symbol="SPY", stance="neutral", **common)
+
+    table = research.score(conn, horizons=(1, 2)).set_index("stance")
+    assert table.loc["bullish", "vs_SPY_1"] == pytest.approx(0.10 + 0.05)
+    assert table.loc["bearish", "vs_SPY_1"] == pytest.approx(-0.10 + 0.05)   # fell, but less than a 5% day
+    assert table.loc["bullish", "vs_SPY_2"] == pytest.approx(0.21 - (0.9025 - 1))
+    # a note on the benchmark is scored as a plain return but has nothing to beat
+    assert table.loc["neutral", "avg_return_1"] == pytest.approx(-0.05)
+    assert np.isnan(table.loc["neutral", "vs_SPY_1"])
+
+
+def test_return_between_lines_up_weekend_bars_with_weekday_ones():
+    spy = pd.Series([100.0, 102, 104], index=pd.to_datetime(["2026-11-06", "2026-11-09", "2026-11-10"]))
+    # a crypto note entered on Saturday 11-07: SPY's latest close by then is Friday's
+    assert research.return_between(spy, pd.Timestamp("2026-11-07"), pd.Timestamp("2026-11-10")) \
+        == pytest.approx(0.04)
+    assert research.return_between(spy, pd.Timestamp("2026-11-07"), pd.Timestamp("2026-11-11")) is None
+    assert research.return_between(spy, pd.Timestamp("2026-11-05"), pd.Timestamp("2026-11-09")) is None
+    assert research.return_between(pd.Series(dtype=float), pd.Timestamp("2026-11-07"),
+                                   pd.Timestamp("2026-11-09")) is None
 
 
 # ---------------------------------------------------------------- news

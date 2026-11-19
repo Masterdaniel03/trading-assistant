@@ -10,3 +10,8 @@ reports/*.md
 .pytest_cache/
 logs/
 data/models/
+
+# Editor and agent-tool files (personal, not project code)
+.vscode/
+.agents/
+.claude/skills/

@@ -44,6 +44,7 @@ DAILY = [
     Step("research notes (Gemini)", ["research"]),
     Step("paper trading", ["paper", "--execute"]),
     Step("model prices", ["model-fetch"]),
+    Step("company filings (SEC)", ["fundamentals-fetch"]),
     Step("model scores", ["model-score"]),
     Step("bot league", ["league"]),
     Step("update the news archive", ["news-archive"], weekly=True),

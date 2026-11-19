@@ -164,6 +164,81 @@ def test_scores_for_a_day_do_not_depend_on_later_prices(tmp_path):
     pd.testing.assert_frame_equal(results[0], results[1].loc[shared], check_exact=False, rtol=1e-4, atol=1e-6)
 
 
+# ---------------------------------------------------------------- inputs from company filings
+
+def test_price_only_models_keep_the_fingerprint_they_had_before_filings_were_added():
+    """A changed fingerprint would retrain the live ridge and gbm models: their record must not move."""
+    import hashlib
+    import json
+
+    import sklearn
+    data = rankmodel.build_dataset(make_panels(), HORIZON)
+    fold = rankmodel.folds(data, 2017)[0]
+    settings = {"alpha": 100.0}
+    old = json.dumps({"model": "ridge", "settings": settings, "features": features.NAMES,
+                      "sklearn": sklearn.__version__, "horizon": HORIZON,
+                      "trained_through": str(fold["trained_through"].date()), "rows": fold["train_rows"]},
+                     sort_keys=True)
+    assert rankmodel.fingerprint("ridge", settings, data, fold) == hashlib.sha1(old.encode()).hexdigest()[:12]
+    assert rankmodel.model_spec("ridge", settings) == ("ridge", ["price"], {"alpha": 100.0})
+    assert rankmodel.model_spec("r", {"kind": "gbm", "inputs": ["price", "fundamentals"], "max_iter": 5}) == \
+        ("gbm", ["price", "fundamentals"], {"max_iter": 5})
+    with pytest.raises(ValueError):
+        rankmodel.model_spec("r", {"inputs": ["tea leaves"]})
+
+
+def test_a_model_given_filing_inputs_uses_them_and_its_twin_does_not(tmp_path):
+    """Plant next week's winners in one extra input: only the model that sees it can find them."""
+    from tradebot import fundamentals
+    panels = make_panels(seed=2)
+    forward = features.forward_return(panels["open"], HORIZON)
+    rng = np.random.default_rng(3)
+    extra = {name: pd.DataFrame(rng.normal(size=forward.shape), index=forward.index, columns=forward.columns)
+             for name in fundamentals.NAMES}
+    extra["roa"] = forward.rank(axis=1, pct=True) + rng.normal(0, 0.3, forward.shape)
+    data = rankmodel.build_dataset(panels, HORIZON, extra)
+    assert data.names == features.NAMES + fundamentals.NAMES and data.x.shape[2] == 34
+    cfg = {"first_test_year": 2017,
+           "models": {"ridge": {"alpha": 1.0}, "ridge-fund": {"kind": "ridge", "inputs": ["price", "fundamentals"],
+                                                             "alpha": 1.0}}}
+    assert rankmodel.needs_fundamentals(cfg) and rankmodel.twins(cfg) == {"ridge-fund": "ridge"}
+    conn = db.connect(":memory:")
+    db.init_db(conn)
+    rankmodel.update_scores(conn, data, cfg, tmp_path, lambda line: None)
+    ic = {name: rankmodel.evaluate(rankmodel.load_scores(conn, name), data, 10, 5)["ic"]["mean"]
+          for name in cfg["models"]}
+    assert ic["ridge-fund"] > 0.3 and abs(ic["ridge"]) < 0.05
+
+    price_only = rankmodel.build_dataset(panels, HORIZON)
+    with pytest.raises(ValueError, match="fundamentals-fetch"):
+        rankmodel.fit_fold("ridge-fund", cfg["models"]["ridge-fund"], price_only, rankmodel.folds(price_only, 2017)[0])
+
+
+def test_the_report_compares_each_filing_model_with_its_twin(tmp_path):
+    from tradebot import fundamentals
+    panels = make_panels(seed=4)
+    extra = {name: panels["close"].pct_change(5) for name in fundamentals.NAMES}
+    data = rankmodel.build_dataset(panels, HORIZON, extra)
+    cfg = {"first_test_year": 2017, "models": {"ridge": {"alpha": 1.0},
+                                               "ridge-fund": {"kind": "ridge", "inputs": ["price", "fundamentals"],
+                                                              "alpha": 1.0}}}
+    conn = db.connect(":memory:")
+    db.init_db(conn)
+    rankmodel.update_scores(conn, data, cfg, None, lambda line: None)
+    days = data.days[data.days.year >= 2017]
+    results = {name: rankmodel.evaluate(rankmodel.load_scores(conn, name), data, 10, 5) for name in cfg["models"]}
+    info = {"symbols": 60, "ended": 0, "first_bar": "2016-01-04", "last_bar": "2018-09-07", "horizon": 5,
+            "top_n": 10, "cost_bps": 5, "model_groups": {n: rankmodel.model_spec(n, s)[1] for n, s in cfg["models"].items()},
+            "fund_coverage": rankmodel.input_coverage(data, fundamentals.NAMES, days),
+            "fund_companies": "60 of 60 companies have filing data", "twins": rankmodel.twins(cfg)}
+    text = rankmodel.render(results, rankmodel.single_inputs(data, days), rankmodel.look_ahead_example(panels, data, days),
+                            rankmodel.folds(data, 2017), info)
+    for piece in ("price, volume and company filings", "## Company filings", "ridge-fund minus ridge",
+                  "| earnings_yield |", "ridge: 25 from price and volume; ridge-fund: 25 from price and volume plus 9",
+                  "public float leaves out", "| 2017 | 100% |"):
+        assert piece in text
+
+
 # ---------------------------------------------------------------- evaluation
 
 def test_overlap_stats_count_each_window_once():

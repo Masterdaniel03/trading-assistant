@@ -21,6 +21,10 @@ def load_config(path: str | Path | None = None) -> dict:
             cfg["universes"][name] = read_tickers(ROOT / value[5:])
     if cfg.get("model"):
         cfg["model"]["prices_path"] = str((ROOT / cfg["model"]["prices_path"]).resolve())
+    if cfg.get("fundamentals"):
+        for key in ("path", "ciks", "successors"):
+            if cfg["fundamentals"].get(key):
+                cfg["fundamentals"][key] = str((ROOT / cfg["fundamentals"][key]).resolve())
     return cfg
 
 
@@ -48,4 +52,6 @@ def load_secrets() -> dict:
         "alpaca_secret": _real_key(os.getenv("ALPACA_SECRET_KEY")),
         "alpaca_paper": os.getenv("ALPACA_PAPER", "true").lower() != "false",
         "gemini_key": _real_key(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")),
+        # SEC asks automated clients to name themselves, e.g. "Jane Doe jane@example.com".
+        "sec_user_agent": _real_key((os.getenv("SEC_USER_AGENT") or "").strip() or None),
     }

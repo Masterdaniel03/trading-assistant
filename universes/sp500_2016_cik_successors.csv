@@ -1,0 +1,36 @@
+# Later SEC numbers (CIK) for tickers in sp500_2016.txt whose company moved its filings to a new
+# registrant: a holding-company reorganisation, a move abroad, or a merger that the ticker's price
+# series follows. Filings of `cik` dated on or after `from` are used for `symbol`, and the earlier
+# SEC number's filings from that date on are ignored (some kept filing as a subsidiary).
+# Found by listing every ticker whose prices run long past its 2015 CIK's last 10-K/10-Q, or whose
+# 2015 CIK stopped reporting a public float (a subsidiary has none). Each row was checked against
+# SEC (company name, and dates of filings that meet the earlier CIK's last ones). Where a ticker's
+# price series moved to another listed company (DOW, FOX, FOXA, WRK), it was checked against that
+# company's daily returns (DOW vs today's DD: correlation 0.995; vs today's DOW: 0.53).
+# Not fixable: CCE's successor (Coca-Cola Europacific Partners) files in IFRS, not US GAAP; YHOO
+# became Altaba, an investment fund that filed no 10-K.
+symbol,cik,from,note
+AGN,1578845,2013-10-01,Actavis plc (later Allergan plc) replaced Actavis Inc as the listed parent
+APA,1841666,2021-03-01,APA Corporation became Apache's holding company
+AVGO,1649338,2016-02-01,Broadcom Limited (Avago bought Broadcom Corporation)
+AVGO,1730168,2018-04-04,Broadcom Inc. (moved to the US)
+BLK,2012383,2024-10-01,new BlackRock holding company (GIP purchase)
+CI,1739940,2018-12-20,new Cigna holding company (Express Scripts purchase)
+DIS,1744489,2019-03-20,new Disney holding company (21st Century Fox purchase)
+DOW,1666700,2017-08-31,DowDuPont / DuPont de Nemours (the 2015 DOW price series follows it)
+ENDP,1593034,2014-02-28,Endo International plc
+FOX,1754301,2019-03-18,Fox Corporation (the 2015 FOX price series follows it)
+FOXA,1754301,2019-03-18,Fox Corporation (the 2015 FOXA price series follows it)
+FTI,1681459,2017-01-16,TechnipFMC plc
+GGP,1496048,2010-11-09,GGP Inc. after the 2010 reorganisation
+GOOG,1652044,2015-10-02,Alphabet Inc.
+GOOGL,1652044,2015-10-02,Alphabet Inc.
+KHC,1637459,2015-07-02,The Kraft Heinz Company
+LLL,1039101,2016-12-31,L3 Technologies (L-3 Holdings merged into its subsidiary)
+MDT,1613103,2015-01-26,Medtronic plc (moved to Ireland)
+MYL,1623613,2015-02-27,Mylan N.V.
+WBA,1618921,2014-12-30,Walgreens Boots Alliance
+WRK,1636023,2015-07-01,WestRock (MeadWestvaco and RockTenn combined)
+WRK,1732845,2018-11-02,new WestRock holding company (KapStone purchase)
+WRK,2005951,2024-07-05,Smurfit Westrock (the 2015 WRK price series follows it)
+XRX,1770450,2019-08-07,Xerox Holdings Corporation

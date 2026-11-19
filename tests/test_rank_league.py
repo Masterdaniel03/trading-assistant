@@ -258,4 +258,5 @@ def test_the_daily_run_trades_before_it_touches_the_model():
     from tradebot.daily import DAILY
     order = [step.args[0] for step in DAILY if not step.weekly]
     assert order.index("paper") < order.index("model-fetch") < order.index("model-score") < order.index("league")
+    assert order.index("model-fetch") < order.index("fundamentals-fetch") < order.index("model-score")
     assert [step.args[0] for step in DAILY if step.weekly][-1] == "model-test"

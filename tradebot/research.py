@@ -282,6 +282,15 @@ def render(note: Note, width: int = 100) -> str:
 
 # ---------------------------------------------------------------- was it any good?
 
+def forward_window(close: pd.Series, as_of: str, bars: int) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """(entry date, exit date) for scoring a note: enter at the first close
+    after `as_of`, exit `bars` bars later. None until enough later bars exist."""
+    entry = int(close.index.searchsorted(pd.Timestamp(as_of), side="right"))
+    if entry + bars >= len(close):
+        return None
+    return close.index[entry], close.index[entry + bars]
+
+
 def forward_return(close: pd.Series, as_of: str, bars: int) -> float | None:
     """Return over `bars` bars, entering at the first close after `as_of`.
 
@@ -289,25 +298,53 @@ def forward_return(close: pd.Series, as_of: str, bars: int) -> float | None:
     been traded on it. Starting one bar later keeps the score honest. None
     until enough later bars exist.
     """
-    entry = int(close.index.searchsorted(pd.Timestamp(as_of), side="right"))
-    if entry + bars >= len(close):
+    window = forward_window(close, as_of, bars)
+    if window is None:
         return None
-    return float(close.iloc[entry + bars] / close.iloc[entry] - 1)
+    start, end = window
+    return float(close[end] / close[start] - 1)
 
 
-def score(conn, horizons: tuple[int, ...] = (1, 5, 20)) -> pd.DataFrame:
-    """Average return after kept notes, by stance. One note per symbol per price date."""
+def return_between(close: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -> float | None:
+    """Return from the last close on or before `start` to the last close on or
+    before `end`. This lines up series that trade on different days (crypto's
+    weekend bars against a stock benchmark). None if `close` doesn't cover both."""
+    close = close.dropna()
+    if close.empty or close.index[0] > start or close.index[-1] < end:
+        return None
+    return float(close.asof(end) / close.asof(start) - 1)
+
+
+def score(conn, horizons: tuple[int, ...] = (1, 5, 20), benchmark: str = "SPY") -> pd.DataFrame:
+    """Average return after kept notes, by stance. One note per symbol per price date.
+
+    `avg_return_N` is the plain return over the next N bars. `vs_<benchmark>_N`
+    is that return minus the benchmark's over the same days. The watchlist moves
+    with the market, so in a falling week every bearish note looks right; the
+    difference is what says whether the note knew anything about the stock.
+    Notes on the benchmark itself are left out of it (their difference is 0).
+    """
     notes = db.research_df(conn)
     notes = notes[notes["status"] == "ok"].drop_duplicates(["symbol", "as_of"], keep="last")
-    closes = {s: db.load_close(conn, s) for s in notes["symbol"].unique()}
+    closes = {s: db.load_close(conn, s) for s in {*notes["symbol"].unique(), benchmark}}
     rows = []
     for stance in DIRECTION:
         group = notes[notes["stance"] == stance]
         row = {"stance": stance, "notes": len(group)}
         for bars in horizons:
-            returns = [r for n in group.itertuples()
-                       if (r := forward_return(closes[n.symbol], n.as_of, bars)) is not None]
+            returns, relative = [], []
+            for n in group.itertuples():
+                window = forward_window(closes[n.symbol], n.as_of, bars)
+                if window is None:
+                    continue
+                r = forward_return(closes[n.symbol], n.as_of, bars)
+                returns.append(r)
+                if n.symbol != benchmark:
+                    market = return_between(closes[benchmark], *window)
+                    if market is not None:
+                        relative.append(r - market)
             row[f"scored_{bars}"] = len(returns)
             row[f"avg_return_{bars}"] = float(np.mean(returns)) if returns else float("nan")
+            row[f"vs_{benchmark}_{bars}"] = float(np.mean(relative)) if relative else float("nan")
         rows.append(row)
     return pd.DataFrame(rows)

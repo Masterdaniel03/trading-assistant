@@ -90,6 +90,23 @@ model:
     ridge: {alpha: 100.0}      # a straight-line model
     gbm: {max_iter: 200, learning_rate: 0.03, max_leaf_nodes: 16, min_samples_leaf: 500,
           l2_regularization: 1.0}   # boosted trees: can use combinations of inputs
+    # Phase 6b (fixed 2026-11-18, before their first test run): the same two models, also given
+    # the nine numbers from company filings (see `fundamentals` below). Their settings are copied
+    # from the price-only models above, so the inputs are the only difference between each pair.
+    ridge-fund: {kind: ridge, inputs: [price, fundamentals], alpha: 100.0}
+    gbm-fund: {kind: gbm, inputs: [price, fundamentals], max_iter: 200, learning_rate: 0.03,
+               max_leaf_nodes: 16, min_samples_leaf: 500, l2_regularization: 1.0}
+
+# Company filings for the ranking model (tradebot/fundamentals.py), from SEC EDGAR.
+#   python main.py fundamentals-fetch    download all, then refresh only the companies that filed
+# Each number counts from the first trading day after its filing date; a restated number only
+# from the restating filing's date. Fixed 2026-11-18, before the first test run.
+fundamentals:
+  path: data/fundamentals.db
+  ciks: universes/sp500_2016_ciks.csv   # SEC numbers from the same 2015 list as the universe
+  successors: universes/sp500_2016_cik_successors.csv   # where a company later moved to a new SEC number
+  max_age_days: 365          # a number for a period that ended longer ago than this counts as unknown
+  float_max_age_days: 730    # the float is reported once a year, as of mid-year, so it may be older
 
 # The bot league: simulated bots that follow the paper bot's rules (decide after
 # the close, trade at the next open, same position cap, stop-loss and costs),
@@ -120,6 +137,9 @@ league:
     - {name: rank-gbm, model: gbm, universe: sp500_2016}
     - {name: hold-sp500, strategy: buy_and_hold, universe: sp500_2016, stop_loss: false,
        start: "2019-01-01"}                                                               # their baseline
+    # The same rank bots following the models that also read company filings (Phase 6b).
+    - {name: rank-ridge-fund, model: ridge-fund, universe: sp500_2016}
+    - {name: rank-gbm-fund, model: gbm-fund, universe: sp500_2016}
 
 # Alerts: a failed daily run, a stop-loss, a day the bot refused to trade.
 # Every alert is kept in the database and logs/alerts.log. To also get them on a

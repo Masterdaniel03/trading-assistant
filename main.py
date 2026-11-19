@@ -341,16 +341,23 @@ def cmd_research_score(cfg, args):
 
     conn = db.connect(cfg["db_path"])
     db.init_db(conn)
-    table = research.score(conn)
+    bench = cfg["benchmark"]
+    table = research.score(conn, benchmark=bench)
     if table["notes"].sum() == 0:
         print("No research notes kept yet. Run: python main.py research")
         return
     print("Average return after each kind of note. A note is scored from the first close")
-    print("after it was written, over the next 1, 5 and 20 bars.\n")
-    with pd.option_context("display.float_format", "{:+.2%}".format, "display.width", 140):
+    print("after it was written, over the next 1, 5 and 20 bars.")
+    print(f"vs_{bench}_N is that return minus {bench}'s over the same days (notes on {bench}")
+    print("itself are left out of it). These stocks move with the market, so in a falling")
+    print(f"week every bearish note looks right: judge the notes by vs_{bench}, not avg_return.\n")
+    with pd.option_context("display.float_format", "{:+.2%}".format, "display.width", 160):
         print(table.to_string(index=False))
     if table[[c for c in table if c.startswith("scored_")]].to_numpy().sum() == 0:
         print("\nNone are old enough to score yet. Check back after a few trading days.")
+    else:
+        print("\nNotes on the same symbol a few days apart cover mostly the same days, so they")
+        print("are not separate pieces of evidence. A few weeks of notes prove little either way.")
 
 
 def cmd_news_archive(cfg, args):
@@ -629,12 +636,42 @@ def _model_setup(cfg):
     return model, conn
 
 
-def _model_dataset(model, conn, say):
+def _fundamental_inputs(cfg, close, say):
+    """The company-filing inputs for every stock and day (tradebot/fundamentals.py)."""
+    from tradebot import fundamentals
+    fc = cfg.get("fundamentals")
+    if not fc:
+        sys.exit("A model asks for company filings, but config.yaml has no `fundamentals` section.")
+    fconn = fundamentals.connect(fc["path"])
+    history = fundamentals.load_history(fconn)
+    if history.empty:
+        sys.exit("No company filings stored yet. Run: python main.py fundamentals-fetch")
+    links = fundamentals.read_links(fc["ciks"], fc.get("successors"))
+    have = {cik for cik, n in fconn.execute("SELECT cik, facts FROM companies") if n > 0}
+    covered = sum(1 for chain in links.values() if any(cik in have for cik, _, _ in chain))
+    moved = sum(1 for chain in links.values() if len(chain) > 1)
+    notes: dict = {}
+    inputs = fundamentals.compute(history, links, close, int(fc.get("max_age_days", 365)),
+                                  int(fc.get("float_max_age_days", 730)), notes)
+    held = notes.get("float_held_back", [])
+    say(f"Company filings: {covered} of {len(links)} tickers have filing data ({moved} follow their company to "
+        f"a later SEC number), filed up to {history['filed'].max()}. {len(held)} reported floats held back "
+        "as likely scale errors" + (": " + ", ".join(f"{s} {d}" for s, d, _ in held) if held else "") + ".")
+    return inputs, (f"{covered} of the {len(links)} tickers have filing data; {moved} follow their company to a "
+                    f"later SEC number after a reorganisation; {len(held)} reported floats were held back as "
+                    "likely scale errors")
+
+
+def _model_dataset(model, conn, say, cfg=None):
     from tradebot import modeldata, rankmodel
     panels, breaks = modeldata.load_clean_panels(conn, model.get("break_ratio"))
     if not panels:
         sys.exit("No prices for the model yet. Run: python main.py model-fetch")
-    data = rankmodel.build_dataset(panels, int(model["horizon_days"]))
+    extra, companies = None, None
+    if rankmodel.needs_fundamentals(model):
+        extra, companies = _fundamental_inputs(cfg or {}, panels["close"], say)
+    data = rankmodel.build_dataset(panels, int(model["horizon_days"]), extra)
+    data.fund_companies = companies
     say(f"{len(data.symbols)} stocks, {len(data.days):,} days of prices, "
         f"{data.days[0]:%Y-%m-%d} to {data.days[-1]:%Y-%m-%d}. "
         f"{len(breaks)} series end early at a data break.")
@@ -657,6 +694,22 @@ def cmd_model_fetch(cfg, args):
                                 fetch, say, full=args.full)
 
 
+def cmd_fundamentals_fetch(cfg, args):
+    """Download or refresh the company filings (SEC EDGAR) for the model's universe."""
+    from tradebot import fundamentals
+
+    fc = cfg.get("fundamentals")
+    if not fc:
+        sys.exit("config.yaml has no `fundamentals` section.")
+    conn = fundamentals.connect(fc["path"])
+    ciks = fundamentals.all_ciks(fundamentals.read_links(fc["ciks"], fc.get("successors")))
+    with RunLog(LOGS / "model.log", "fundamentals-fetch") as say:
+        result = fundamentals.update(conn, ciks, fundamentals.Sec(load_secrets()["sec_user_agent"]),
+                                     say, full=args.full)
+    if result["failed"]:
+        sys.exit(f"{len(result['failed'])} companies could not be downloaded; the next run tries them again.")
+
+
 def _clear_scores(conn, say):
     import shutil
     conn.execute("DELETE FROM model_scores")
@@ -673,7 +726,7 @@ def cmd_model_score(cfg, args):
     with RunLog(LOGS / "model.log", "model-score") as say:
         if args.rebuild:
             _clear_scores(conn, say)
-        _, data, _ = _model_dataset(model, conn, say)
+        _, data, _ = _model_dataset(model, conn, say, cfg)
         added = rankmodel.update_scores(conn, data, model, ROOT / "data" / "models", say)
         say("New scores: " + ", ".join(f"{name} {count:,}" for name, count in added.items()) +
             f". Scored up to {data.days[-1]:%Y-%m-%d}.")
@@ -687,7 +740,7 @@ def cmd_model_test(cfg, args):
     with RunLog(LOGS / "model.log", "model-test") as say:
         if args.rebuild:
             _clear_scores(conn, say)
-        panels, data, breaks = _model_dataset(model, conn, say)
+        panels, data, breaks = _model_dataset(model, conn, say, cfg)
         rankmodel.update_scores(conn, data, model, ROOT / "data" / "models", say)
         plan = rankmodel.folds(data, int(model["first_test_year"]))
         if not plan:
@@ -700,7 +753,13 @@ def cmd_model_test(cfg, args):
         info = {"symbols": len(data.symbols), "ended": int((last < data.days[-1]).sum()),
                 "first_bar": f"{data.days[0]:%Y-%m-%d}", "last_bar": f"{data.days[-1]:%Y-%m-%d}",
                 "horizon": data.horizon, "top_n": top_n, "cost_bps": cost_bps,
-                "break_ratio": model.get("break_ratio"), "breaks": breaks}
+                "break_ratio": model.get("break_ratio"), "breaks": breaks,
+                "model_groups": {name: rankmodel.model_spec(name, settings)[1]
+                                 for name, settings in model["models"].items()}}
+        if rankmodel.needs_fundamentals(model):
+            from tradebot import fundamentals
+            info.update(fund_coverage=rankmodel.input_coverage(data, fundamentals.NAMES, test_days),
+                        fund_companies=data.fund_companies, twins=rankmodel.twins(model))
         report = rankmodel.render(results, rankmodel.single_inputs(data, test_days),
                                   rankmodel.look_ahead_example(panels, data, test_days), plan, info)
     print(report)
@@ -847,6 +906,9 @@ def build_parser():
     sub.add_parser("league", help="replay every league bot from stored prices; print the leaderboard")
     mf = sub.add_parser("model-fetch", help="download or refresh the ranking model's prices (Alpaca)")
     mf.add_argument("--full", action="store_true", help="download the whole history again")
+    ff = sub.add_parser("fundamentals-fetch",
+                        help="download or refresh company filings (SEC EDGAR) for the ranking model")
+    ff.add_argument("--full", action="store_true", help="download every company again")
     for name, text in (("model-score", "score every stock for the days not scored yet"),
                        ("model-test", "walk-forward test of the ranking model, with a report")):
         mp = sub.add_parser(name, help=text)
@@ -869,7 +931,8 @@ COMMANDS = {
     "paper": cmd_paper, "daily": cmd_daily,
     "log-trade": cmd_log_trade, "report": cmd_report,
     "league": cmd_league, "pause": cmd_pause, "resume": cmd_pause,
-    "model-fetch": cmd_model_fetch, "model-score": cmd_model_score, "model-test": cmd_model_test,
+    "model-fetch": cmd_model_fetch, "fundamentals-fetch": cmd_fundamentals_fetch,
+    "model-score": cmd_model_score, "model-test": cmd_model_test,
     "alerts": cmd_alerts, "alert-test": cmd_alert_test, "dashboard": cmd_dashboard,
 }
 

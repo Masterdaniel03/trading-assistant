@@ -345,16 +345,20 @@ with signals_tab:
 
     st.markdown("**How past research notes turned out**")
     from tradebot import research
-    scores = research.score(conn)
+    bench = cfg["benchmark"]
+    scores = research.score(conn, benchmark=bench)
     if scores["notes"].sum() == 0:
         st.info("No research notes kept yet. Run `python main.py research`.")
     elif scores[[c for c in scores if c.startswith("scored_")]].to_numpy().sum() == 0:
         st.info(f"{int(scores['notes'].sum())} notes kept so far. None are old enough to score yet: "
                 "a note is scored against the closes after it was written.")
     else:
-        st.caption("Average return after each kind of note, over the next 1, 5 and 20 trading days.")
+        st.caption(f"Average return after each kind of note, over the next 1, 5 and 20 trading days. "
+                   f"`vs_{bench}` is that return minus {bench}'s over the same days: these stocks move "
+                   f"with the market, so judge the notes by `vs_{bench}`, not the plain return.")
         st.dataframe(scores, hide_index=True, width="stretch", column_config={
-            c: st.column_config.NumberColumn(format="percent") for c in scores if c.startswith("avg_return_")})
+            c: st.column_config.NumberColumn(format="percent") for c in scores
+            if c.startswith(("avg_return_", "vs_"))})
 
     with st.expander("Every research attempt, including rejected ones"):
         st.dataframe(dd.research_log(conn), hide_index=True, width="stretch")

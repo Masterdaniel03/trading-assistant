@@ -13,7 +13,10 @@ tickers from its table. They are the tickers of that day (FB, not META);
 Alpaca's `asof` option follows each one to the company's later names.
 
 The result goes to universes/sp500_<year>.txt, one ticker per line, in
-Alpaca's format (BRK.B, not BRK-B).
+Alpaca's format (BRK.B, not BRK-B). The same table's SEC company numbers (CIK)
+go to universes/sp500_<year>_ciks.csv, for the company filings
+(tradebot/fundamentals.py). Taking both from the same old page means each
+ticker is matched to the company that used it at the time.
 """
 from __future__ import annotations
 
@@ -37,13 +40,21 @@ def clean(ticker) -> str | None:
     return ticker.strip().upper().replace("-", ".")
 
 
-def tickers_from(html: str) -> list[str]:
-    """The tickers in the page's member table (the first table with a ticker column)."""
+def members_from(html: str) -> pd.DataFrame:
+    """The page's member table (the first table with a ticker column): ticker and CIK, one row per ticker."""
     for table in pd.read_html(io.StringIO(html)):
         column = next((c for c in table.columns if str(c).lower() in ("symbol", "ticker symbol", "ticker")), None)
         if column is not None and len(table) > 400:
-            return sorted({t for t in map(clean, table[column]) if t})
+            cik = next((c for c in table.columns if str(c).strip().upper() == "CIK"), None)
+            out = pd.DataFrame({"symbol": table[column].map(clean),
+                                "cik": pd.to_numeric(table[cik], errors="coerce") if cik is not None else None})
+            return (out.dropna(subset=["symbol"]).drop_duplicates("symbol")
+                    .sort_values("symbol").reset_index(drop=True))
     raise ValueError("No member table found on the page.")
+
+
+def tickers_from(html: str) -> list[str]:
+    return members_from(html)["symbol"].tolist()
 
 
 def last_revision_before(date: str) -> dict:
@@ -58,15 +69,24 @@ def main(as_of: str) -> None:
     revision = last_revision_before(as_of)
     reply = requests.get(PAGE, headers=HEADERS, timeout=30, params={"title": TITLE, "oldid": revision["revid"]})
     reply.raise_for_status()
-    members = tickers_from(reply.text)
+    table = members_from(reply.text)
+    members = table["symbol"].tolist()
     target = ROOT / "universes" / f"sp500_{as_of[:4]}.txt"
     target.parent.mkdir(exist_ok=True)
+    source = f"# Source: Wikipedia, \"{TITLE}\", revision {revision['revid']} (the last one before {as_of})."
     header = [f"# S&P 500 members as listed on {revision['timestamp'][:10]}: {len(members)} tickers.",
               "# These are the tickers of that day, in Alpaca's format (FB, not META; BRK.B, not BRK-B).",
-              f"# Source: Wikipedia, \"{TITLE}\", revision {revision['revid']} (the last one before {as_of}).",
-              f"# Rebuild with: python scripts/build_universe.py {as_of}"]
+              source, f"# Rebuild with: python scripts/build_universe.py {as_of}"]
     target.write_text("\n".join(header + members) + "\n", encoding="utf-8")
     print(f"{len(members)} members as listed on {revision['timestamp'][:10]}. Written to {target}")
+
+    known = table.dropna(subset=["cik"])
+    ciks = target.with_name(f"sp500_{as_of[:4]}_ciks.csv")
+    lines = [f"# SEC company numbers (CIK) for {target.name}: {len(known)} of {len(members)} tickers.",
+             source, f"# Rebuild with: python scripts/build_universe.py {as_of}", "symbol,cik"]
+    lines += [f"{row.symbol},{int(row.cik)}" for row in known.itertuples()]
+    ciks.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"CIKs for {len(known)} of {len(members)} tickers. Written to {ciks}")
 
 
 if __name__ == "__main__":

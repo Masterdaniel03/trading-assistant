@@ -15,46 +15,93 @@ Walk-forward, with no hindsight:
 * A score, once stored, is never recomputed. What the league bots saw stays put.
 
 Model settings come from config.yaml (model.models) and were fixed before the
-first test run.
+first test run. A model sees the price and volume inputs (tradebot/features.py)
+unless its settings say `inputs: [price, fundamentals]`, which adds the numbers
+from company filings (tradebot/fundamentals.py); `kind` then says which model
+it is (ridge or gbm).
 """
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from tradebot import features
+from tradebot import features, fundamentals
 from tradebot.newstest import daily_ic, verdict
 
 MIN_NAMES = 50                 # a day with fewer scored stocks than this is not evaluated
 MIN_HISTORY_FEATURE = "ret_21d"   # a stock enters once it has a month of bars
+INPUTS = {"price": features.NAMES, "fundamentals": fundamentals.NAMES}
+DESCRIPTIONS = {**features.FEATURES, **fundamentals.FEATURES}
 
 
 @dataclass
 class Dataset:
     days: pd.DatetimeIndex
     symbols: list[str]
-    x: np.ndarray                  # (days, symbols, features): each day's ranks, NaN where a feature is missing
+    x: np.ndarray                  # (days, symbols, inputs): each day's ranks, NaN where an input is missing
     valid: np.ndarray              # (days, symbols): the stock traded that day and has a month of history
     target: np.ndarray             # (days, symbols): rank of the forward return within the day; NaN if unknown
     forward: pd.DataFrame          # the forward returns themselves
-    raw: dict[str, pd.DataFrame]   # unranked features, for the single-input table
+    raw: dict[str, pd.DataFrame]   # unranked inputs, for the single-input table
     horizon: int
+    names: list[str] = field(default_factory=lambda: list(features.NAMES))   # the inputs in x, in order
 
 
-def build_dataset(panels: dict[str, pd.DataFrame], horizon: int) -> Dataset:
+def build_dataset(panels: dict[str, pd.DataFrame], horizon: int,
+                  extra: dict[str, pd.DataFrame] | None = None) -> Dataset:
+    """`extra`: more inputs as (days x symbols) tables, e.g. fundamentals.compute(...)."""
+    close = panels["close"]
     raw = features.compute(panels)
-    valid = panels["close"].notna() & raw[MIN_HISTORY_FEATURE].notna()
+    for name, frame in (extra or {}).items():
+        raw[name] = frame.reindex(index=close.index, columns=close.columns).astype(float)
+    names = list(raw)
+    valid = close.notna() & raw[MIN_HISTORY_FEATURE].notna()
     raw = {name: frame.where(valid) for name, frame in raw.items()}
-    x = np.stack([features.rank_rows(raw[name]).to_numpy(np.float32) for name in features.NAMES], axis=2)
+    x = np.stack([features.rank_rows(raw[name]).to_numpy(np.float32) for name in names], axis=2)
     forward = features.forward_return(panels["open"], horizon).where(valid)
     target = features.rank_rows(forward).to_numpy(np.float32)
-    close = panels["close"]
-    return Dataset(close.index, list(close.columns), x, valid.to_numpy(), target, forward, raw, horizon)
+    return Dataset(close.index, list(close.columns), x, valid.to_numpy(), target, forward, raw, horizon, names)
+
+
+# ---------------------------------------------------------------- which model sees what
+
+def model_spec(name: str, settings: dict | None) -> tuple[str, list[str], dict]:
+    """(kind, input groups, the estimator's own settings) for one `model.models` entry.
+
+    `ridge: {alpha: 100}` is a ridge model on the price inputs. `ridge-fund:
+    {kind: ridge, inputs: [price, fundamentals], alpha: 100}` is the same model
+    given the company-filing inputs too."""
+    params = dict(settings or {})
+    kind = params.pop("kind", name)
+    groups = list(params.pop("inputs", ["price"]))
+    unknown = [g for g in groups if g not in INPUTS]
+    if unknown:
+        raise ValueError(f"Model {name!r}: unknown inputs {unknown}. Options: {list(INPUTS)}")
+    return kind, groups, params
+
+
+def model_inputs(name: str, settings: dict | None) -> list[str]:
+    return [n for group in model_spec(name, settings)[1] for n in INPUTS[group]]
+
+
+def needs_fundamentals(model_cfg: dict) -> bool:
+    return any("fundamentals" in model_spec(name, settings)[1]
+               for name, settings in (model_cfg.get("models") or {}).items())
+
+
+def _columns(name: str, settings: dict | None, data: Dataset) -> np.ndarray:
+    wanted = model_inputs(name, settings)
+    missing = [n for n in wanted if n not in data.names]
+    if missing:
+        raise ValueError(f"Model {name!r} needs inputs that were not loaded ({', '.join(missing[:3])}"
+                         f"{', ...' if len(missing) > 3 else ''}). For company filings, run "
+                         "`python main.py fundamentals-fetch` first.")
+    return np.array([data.names.index(n) for n in wanted])
 
 
 # ---------------------------------------------------------------- walk-forward schedule
@@ -80,33 +127,36 @@ def folds(data: Dataset, first_test_year: int) -> list[dict]:
     return out
 
 
-def make_model(name: str, settings: dict):
-    if name == "ridge":
+def make_model(kind: str, settings: dict):
+    if kind == "ridge":
         from sklearn.linear_model import Ridge
         return Ridge(alpha=float(settings.get("alpha", 1.0)))
-    if name == "gbm":
+    if kind == "gbm":
         from sklearn.ensemble import HistGradientBoostingRegressor
         return HistGradientBoostingRegressor(random_state=0, **settings)
-    raise ValueError(f"Unknown model {name!r}. Options: ridge, gbm")
+    raise ValueError(f"Unknown model {kind!r}. Options: ridge, gbm")
 
 
-def _prepare(name: str, x: np.ndarray) -> np.ndarray:
+def _prepare(kind: str, x: np.ndarray) -> np.ndarray:
     """Ridge cannot take missing values: a missing rank becomes 0, the middle. The trees handle NaN themselves."""
-    return np.nan_to_num(x, nan=0.0) if name == "ridge" else x
+    return np.nan_to_num(x, nan=0.0) if kind == "ridge" else x
 
 
 def fit_fold(name: str, settings: dict, data: Dataset, fold: dict):
+    kind, _, params = model_spec(name, settings)
+    columns = _columns(name, settings, data)
     rows = data.valid[:fold["last_train"] + 1] & np.isfinite(data.target[:fold["last_train"] + 1])
-    x = data.x[:fold["last_train"] + 1][rows]
+    x = data.x[:fold["last_train"] + 1][rows][:, columns]
     y = data.target[:fold["last_train"] + 1][rows]
-    return make_model(name, settings).fit(_prepare(name, x), y)
+    return make_model(kind, params).fit(_prepare(kind, x), y)
 
 
 def fingerprint(name: str, settings: dict, data: Dataset, fold: dict) -> str:
-    """Changes whenever the trained model would: settings, features, horizon, the training period,
-    or the scikit-learn version (a model pickled by one version may load wrongly in another)."""
+    """Changes whenever the trained model would: settings, inputs, horizon, the training period,
+    or the scikit-learn version (a model pickled by one version may load wrongly in another).
+    A price-only model's fingerprint is the same as before company filings were added."""
     import sklearn
-    text = json.dumps({"model": name, "settings": settings, "features": features.NAMES,
+    text = json.dumps({"model": name, "settings": settings, "features": model_inputs(name, settings),
                        "sklearn": sklearn.__version__,
                        "horizon": data.horizon, "trained_through": str(fold["trained_through"].date()),
                        "rows": fold["train_rows"]}, sort_keys=True)
@@ -132,14 +182,16 @@ def get_model(name: str, settings: dict, data: Dataset, fold: dict, cache_dir: P
     return model
 
 
-def score_days(name: str, model, data: Dataset, day_indexes) -> pd.DataFrame:
+def score_days(name: str, settings: dict, model, data: Dataset, day_indexes) -> pd.DataFrame:
     """Scores for the given days as rows of (date, symbol, score)."""
+    kind = model_spec(name, settings)[0]
+    columns = _columns(name, settings, data)
     parts = []
     for i in day_indexes:
         rows = data.valid[i]
         if rows.sum() == 0:
             continue
-        scores = model.predict(_prepare(name, data.x[i][rows]))
+        scores = model.predict(_prepare(kind, data.x[i][rows][:, columns]))
         parts.append(pd.DataFrame({"date": data.days[i].strftime("%Y-%m-%d"),
                                    "symbol": np.asarray(data.symbols)[rows], "score": scores.astype(float)}))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["date", "symbol", "score"])
@@ -178,7 +230,7 @@ def update_scores(conn, data: Dataset, model_cfg: dict, cache_dir: Path | None =
             if not missing:
                 continue
             model = get_model(name, settings or {}, data, fold, cache_dir, say)
-            rows = score_days(name, model, data, missing)
+            rows = score_days(name, settings or {}, model, data, missing)
             added[name] += save_scores(conn, name, rows)
             say(f"  {name} {fold['year']}: trained on {fold['train_rows']:,} stock-days up to "
                 f"{fold['trained_through']:%Y-%m-%d}; scored {len(missing)} day(s)")
@@ -249,6 +301,7 @@ def evaluate(scores: pd.DataFrame, data: Dataset, top_n: int, cost_bps: float) -
     per_year = 252 / h
     return {
         "days": len(ic), "first_day": ic.index.min(), "last_day": ic.index.max(),
+        "ic_daily": ic,
         "ic": overlap_stats(ic, h),
         "ic_by_year": ic.groupby(ic.index.year).mean().to_dict(),
         "quintiles": quintile_excess(scores, data.forward, h),
@@ -265,11 +318,20 @@ def single_inputs(data: Dataset, days: pd.DatetimeIndex) -> pd.DataFrame:
     """How well each input ranks stocks on its own, over the test days."""
     rows = []
     forward = data.forward.loc[days]
-    for name in features.NAMES:
+    for name in data.names:
         stats = overlap_stats(daily_ic(data.raw[name].loc[days], forward, min_names=MIN_NAMES), data.horizon)
-        rows.append({"input": name, "group": features.FEATURES[name][0], "meaning": features.FEATURES[name][1],
-                     "ic": stats["mean"], "t_stat": stats["t_stat"]})
+        group, meaning = DESCRIPTIONS.get(name, ("other", name))
+        rows.append({"input": name, "group": group, "meaning": meaning, "ic": stats["mean"], "t_stat": stats["t_stat"]})
     return pd.DataFrame(rows)
+
+
+def input_coverage(data: Dataset, names: list[str], days: pd.DatetimeIndex) -> pd.DataFrame:
+    """Share of scored stock-days that have each input, by year (rows: years, columns: inputs)."""
+    valid = pd.DataFrame(data.valid, index=data.days, columns=data.symbols).loc[days]
+    per_year = {name: data.raw[name].loc[days].notna().groupby(days.year).sum().sum(axis=1)
+                for name in names}
+    stock_days = valid.groupby(days.year).sum().sum(axis=1)
+    return pd.DataFrame({name: counts / stock_days for name, counts in per_year.items()})
 
 
 def look_ahead_example(panels: dict[str, pd.DataFrame], data: Dataset, days: pd.DatetimeIndex) -> dict:
@@ -305,6 +367,61 @@ def _data_section(info: dict) -> list[str]:
             f"stopped trading. {len(breaks)} series end this way: {listed}.", ""]
 
 
+def twins(model_cfg: dict) -> dict[str, str]:
+    """Each model that sees company filings -> the price-only model with the same kind and settings."""
+    specs = {name: model_spec(name, settings) for name, settings in (model_cfg.get("models") or {}).items()}
+    out = {}
+    for name, (kind, groups, params) in specs.items():
+        if "fundamentals" in groups:
+            out.update({name: other for other, (k, g, p) in specs.items()
+                        if g == ["price"] and k == kind and p == params})
+    return out
+
+
+def _inputs_lines(info: dict, count: int) -> list[str]:
+    groups = info.get("model_groups")
+    if not groups:
+        return [f"- Inputs: {count} numbers per stock per day, each replaced by its rank among that day's stocks"]
+    words = {"price": f"{len(features.NAMES)} from price and volume",
+             "fundamentals": f"{len(fundamentals.NAMES)} from company filings"}
+    same: dict[tuple, list[str]] = {}
+    for name, used in groups.items():
+        same.setdefault(tuple(used), []).append(name)
+    parts = [f"{', '.join(names)}: {' plus '.join(words[g] for g in used)}" for used, names in same.items()]
+    return ["- Inputs, each replaced by its rank among that day's stocks. " + "; ".join(parts)]
+
+
+def _filings_section(info: dict, results: dict) -> list[str]:
+    coverage = info.get("fund_coverage")
+    if coverage is None:
+        return []
+    out = ["## Company filings", "",
+           f"The models marked `-fund` also see {len(fundamentals.NAMES)} numbers from each company's 10-K and 10-Q "
+           f"filings (SEC EDGAR's XBRL company facts; {info.get('fund_companies', 'n/a')}). They are dated by when "
+           "they became public: a filing dated D is first used after the close of the next trading day; a restated "
+           "number replaces the old one only from the date of the filing that restated it; a number for a period "
+           "that ended more than a year earlier counts as unknown. Market value is the public float each 10-K "
+           "reports, carried forward by the stock's own return since the float's date. Each `-fund` model has the "
+           "same settings as its price-only twin, so the inputs are the only difference.", "",
+           "Share of scored stock-days that have each input:", "",
+           "| Year | " + " | ".join(coverage.columns) + " |", "|---|" + "---|" * len(coverage.columns)]
+    for year, row in coverage.iterrows():
+        out.append(f"| {year} | " + " | ".join(f"{v:.0%}" for v in row) + " |")
+    pairs = [(name, twin) for name, twin in info.get("twins", {}).items() if name in results and twin in results]
+    if pairs:
+        out += ["", "**With and without the filings** (each day's rank IC of the `-fund` model minus its "
+                    "price-only twin's, over the same days)", "",
+                "| Models | Rank IC difference | t | Days the filings helped |", "|---|---|---|---|"]
+        for name, twin in pairs:
+            diff = (results[name]["ic_daily"] - results[twin]["ic_daily"]).dropna()
+            stats = overlap_stats(diff, info["horizon"])
+            out.append(f"| {name} minus {twin} | {_num(stats['mean'], 4)} | {_num(stats['t_stat'])} | "
+                       f"{stats['share_positive']:.0%} |")
+        out += ["", "A t above 2 would mean the filings added ranking skill beyond what price and volume already "
+                    "carried; below 2, the difference could be luck."]
+    return out + [""]
+
+
 def _pct(value, digits: int = 1) -> str:
     return "n/a" if value is None or not np.isfinite(value) else f"{value:+.{digits}%}"
 
@@ -316,8 +433,10 @@ def _num(value, digits: int = 2) -> str:
 def render(results: dict[str, dict], inputs: pd.DataFrame, cheat: dict, plan: list[dict], info: dict) -> str:
     h, n = info["horizon"], info["top_n"]
     first = next(iter(results.values()))
+    filings = info.get("fund_coverage") is not None
     out = [
-        "# Ranking model test: can price and volume history rank next week's winners?",
+        "# Ranking model test: can " + ("price, volume and company filings" if filings else
+                                        "price and volume history") + " rank next week's winners?",
         "",
         f"- Universe: {info['symbols']} stocks, the S&P 500 as it was listed at the end of 2015 "
         f"({info['ended']} of them stopped trading, or hit a data break, before today; they are kept in the "
@@ -325,10 +444,11 @@ def render(results: dict[str, dict], inputs: pd.DataFrame, cheat: dict, plan: li
         f"- Prices: {info['first_bar']} to {info['last_bar']}; scored out of sample from "
         f"{first['first_day']:%Y-%m-%d} to {first['last_day']:%Y-%m-%d}",
         f"- Decision: after each day's close. Outcome: buy at the next open, sell at the open {h} trading days later",
-        f"- Inputs: {len(inputs)} numbers per stock per day, each replaced by its rank among that day's stocks",
+        *_inputs_lines(info, len(inputs)),
         "- Walk-forward: each year's scores come from a model trained only on earlier years",
         "",
         *_data_section(info),
+        *_filings_section(info, results),
         "## Point-in-time audit",
         "",
         "| Test year | Trained on days up to | Whose outcomes were known by | First test day | Stock-days trained on |",
@@ -410,4 +530,19 @@ def render(results: dict[str, dict], inputs: pd.DataFrame, cheat: dict, plan: li
         "above more than the rank IC, which only looks at the order of the stocks.",
         "- The live record of the league's rank bots, which started after this test, is the evidence that counts.",
     ]
+    if filings:
+        out[-1:-1] = [
+            "- Company filings: the public float leaves out shares held by insiders, so founder-controlled "
+            "companies look smaller, and cheaper, than they are.",
+            "- A company that moved its filings to a new SEC number is followed there only if it is listed in "
+            "universes/sp500_2016_cik_successors.csv (21 tickers, such as Google to Alphabet). One that is missed, "
+            "or whose successor files in IFRS rather than US GAAP, has no filing data after the move: a number "
+            "older than a year counts as unknown, not as current.",
+            "- SEC's company-facts files lag for a few companies (in November 2026, no 10-Q from mid-2026 for about "
+            "ten, including Citigroup and NextEra); their numbers age until they drop out.",
+            "- Companies tag the same line differently, and a few tag it wrongly. The coverage table shows how much "
+            "is missing; a wrong tag that slipped through is not caught.",
+            "- The nine filing inputs come from published research that is known today, so their choice is not "
+            "perfectly free of hindsight either.",
+        ]
     return "\n".join(out)
